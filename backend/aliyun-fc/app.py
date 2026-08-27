@@ -22,8 +22,44 @@ AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v5/place/around"
 DEFAULT_ADCODE = "440305"
 DEFAULT_STATION_KEYWORD = "大学城地铁站-C口"
 DEFAULT_SEARCH_RADIUS = 2000
-PLACE_KEYWORDS = "公园|绿地|图书馆|书店|美术馆|文化馆|博物馆|广场|咖啡"
-EXCLUDED_NAME_PARTS = ("停车场", "卫生间", "充电站", "出入口", "售票处")
+PLACE_SEARCH_GROUPS = (
+    ("nature", "公园|绿地|广场|花园"),
+    ("culture", "图书馆|书店|美术馆|博物馆|文化馆|展览馆"),
+    ("rest", "咖啡厅|咖啡|茶馆|茶室"),
+)
+EXCLUDED_NAME_PARTS = (
+    "停车场",
+    "卫生间",
+    "充电站",
+    "出入口",
+    "售票处",
+    "培训",
+    "教育",
+    "成长中心",
+    "俱乐部",
+    "路演大厅",
+)
+EXCLUDED_TYPE_PARTS = (
+    "培训机构",
+    "公司企业",
+    "楼宇",
+    "产业园区",
+    "运动场馆",
+)
+CATEGORY_LIMITS = {
+    "自然空间": 5,
+    "阅读空间": 3,
+    "文化空间": 3,
+    "公共空间": 2,
+    "停留空间": 3,
+}
+CATEGORY_PRIORITY = {
+    "自然空间": 0,
+    "阅读空间": 1,
+    "文化空间": 2,
+    "公共空间": 3,
+    "停留空间": 4,
+}
 
 
 class AmapError(Exception):
@@ -169,20 +205,26 @@ def find_station(adcode):
 
 
 def classify_place(name, type_name):
-    text = name + " " + type_name
+    if any(part in name for part in EXCLUDED_NAME_PARTS):
+        return None
+    if any(part in type_name for part in EXCLUDED_TYPE_PARTS):
+        return None
 
-    if any(word in text for word in ("公园", "绿地", "植物", "花园", "山")):
-        return "自然空间", ["自然接触", "开放空间"]
-    if any(word in text for word in ("图书馆", "书店")):
-        return "阅读空间", ["精神滋养", "室内空间"]
-    if any(word in text for word in ("美术馆", "文化馆", "博物馆", "艺术")):
-        return "文化空间", ["温和刺激", "室内空间"]
-    if any(word in text for word in ("广场", "步行街")):
-        return "公共空间", ["轻微人流", "开放空间"]
-    if any(word in text for word in ("咖啡", "茶馆", "茶室")):
-        return "停留空间", ["可消费停留", "可能有座位"]
+    # “创客公园”“产业园”等名称并不等于自然公园。自然空间必须由
+    # 高德地点类型明确标注为公园或城市广场，不能只凭名称推断。
+    type_parts = {part.strip() for part in type_name.split(";") if part.strip()}
+    if "公园广场" in type_parts and "公园" in type_parts:
+        return "自然空间", ["地图类型：公园", "自然体验待实地核验"]
+    if "公园广场" in type_parts and any("广场" in part for part in type_parts - {"公园广场"}):
+        return "公共空间", ["地图类型：广场", "人流与座椅待实地核验"]
+    if any(word in name for word in ("图书馆", "书店")):
+        return "阅读空间", ["地图名称：阅读空间", "开放与安静度待核验"]
+    if any(word in name for word in ("美术馆", "文化馆", "博物馆", "展览馆")):
+        return "文化空间", ["地图名称：文化空间", "开放时间待核验"]
+    if any(word in name for word in ("咖啡", "茶馆", "茶室")):
+        return "停留空间", ["地图名称：咖啡或茶空间", "消费与座位待核验"]
 
-    return "城市空间", ["待人工判断"]
+    return None
 
 
 def serialize_place(poi):
@@ -190,7 +232,11 @@ def serialize_place(poi):
     type_name = text_value(poi.get("type"))
     location = split_location(poi.get("location"))
 
-    if not name or not location or any(part in name for part in EXCLUDED_NAME_PARTS):
+    if not name or not location:
+        return None
+
+    classification = classify_place(name, type_name)
+    if not classification:
         return None
 
     try:
@@ -198,7 +244,7 @@ def serialize_place(poi):
     except ValueError:
         distance = 0
 
-    category, signals = classify_place(name, type_name)
+    category, signals = classification
 
     return {
         "id": text_value(poi.get("id")),
@@ -211,6 +257,61 @@ def serialize_place(poi):
         "location": location,
         "fieldVerified": False,
     }
+
+
+def dedupe_key(place):
+    name = normalized_name(place["name"])
+    location = place["location"]
+    return (
+        name,
+        round(location["longitude"], 4),
+        round(location["latitude"], 4),
+    )
+
+
+def select_balanced_places(raw_places, maximum=12):
+    unique = []
+    seen_ids = set()
+    seen_places = set()
+
+    for poi in raw_places:
+        place = serialize_place(poi)
+        if not place:
+            continue
+
+        place_key = dedupe_key(place)
+        place_id = place["id"]
+        if (place_id and place_id in seen_ids) or place_key in seen_places:
+            continue
+
+        if place_id:
+            seen_ids.add(place_id)
+        seen_places.add(place_key)
+        unique.append(place)
+
+    unique.sort(
+        key=lambda place: (
+            CATEGORY_PRIORITY.get(place["category"], 99),
+            place["distanceMeters"],
+            place["name"],
+        )
+    )
+
+    selected = []
+    category_counts = {}
+    for place in unique:
+        category = place["category"]
+        count = category_counts.get(category, 0)
+        if count >= CATEGORY_LIMITS.get(category, 0):
+            continue
+        category_counts[category] = count + 1
+        selected.append(place)
+        if len(selected) == maximum:
+            break
+
+    # 最终展示按距离排序；类别优先级只用于控制候选结构。
+    selected.sort(key=lambda place: (place["distanceMeters"], place["name"]))
+    return selected, category_counts
 
 
 @app.route("/", methods=["GET"])
@@ -293,31 +394,25 @@ def places():
         adcode = env_value("AMAP_DEFAULT_ADCODE", DEFAULT_ADCODE)
         station = find_station(adcode)
         station_location = station.get("location")
-        around = amap_get(
-            AMAP_PLACE_AROUND_URL,
-            {
-                "location": station_location,
-                "keywords": PLACE_KEYWORDS,
-                "radius": str(DEFAULT_SEARCH_RADIUS),
-                "sortrule": "distance",
-                "region": adcode,
-                "show_fields": "business",
-                "page_size": "25",
-                "page_num": "1",
-            },
-            timeout=10,
-        )
+        raw_places = []
+        for _, keywords in PLACE_SEARCH_GROUPS:
+            around = amap_get(
+                AMAP_PLACE_AROUND_URL,
+                {
+                    "location": station_location,
+                    "keywords": keywords,
+                    "radius": str(DEFAULT_SEARCH_RADIUS),
+                    "sortrule": "distance",
+                    "region": adcode,
+                    "show_fields": "business",
+                    "page_size": "25",
+                    "page_num": "1",
+                },
+                timeout=10,
+            )
+            raw_places.extend(around.get("pois", []))
 
-        candidates = []
-        seen_ids = set()
-        for poi in around.get("pois", []):
-            place = serialize_place(poi)
-            if not place or place["id"] in seen_ids:
-                continue
-            seen_ids.add(place["id"])
-            candidates.append(place)
-            if len(candidates) == 12:
-                break
+        candidates, category_counts = select_balanced_places(raw_places)
 
         return jsonify({
             "ok": True,
@@ -329,6 +424,8 @@ def places():
             },
             "searchRadiusMeters": DEFAULT_SEARCH_RADIUS,
             "candidateStatus": "地图候选，需人工实地核验安静度、座椅、遮蔽与开放时间",
+            "selectionPolicy": "以高德地点类型为主，过滤培训、楼栋、园区和活动场馆，并按类别限额去重",
+            "categoryCounts": category_counts,
             "places": candidates,
         })
     except AmapError as error:
