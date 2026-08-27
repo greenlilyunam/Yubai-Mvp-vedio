@@ -14,6 +14,19 @@ import type { HubTab } from "./ExtendedScreens";
 type Step = "splash" | "home" | "world" | "resonance" | "map" | "mapAdd" | "mapEntry" | "profile" | "card" | "input" | "thinking" | "negotiate" | "plan" | "journey" | "adjust" | "reflection" | "done";
 type Branch = "noise" | "tired" | "continue";
 type InputState = { energy: number; time: number; social: "独处" | "轻微接触" | "开放交流"; action: "散步" | "坐一会" | "寻找灵感"; description: string };
+type WeatherData = {
+  ok: true;
+  area: { province: string; city: string; adcode: string };
+  humidity: string;
+  reportTime: string;
+  source: string;
+  temperature: string;
+  weather: string;
+  windDirection: string;
+  windPower: string;
+};
+
+const YUBAI_API_BASE = (import.meta.env.VITE_YUBAI_API_BASE || "https://yubai-api-nuoztsegcf.cn-shenzhen.fcapp.run").replace(/\/$/, "");
 
 const adjustments = {
   noise: {
@@ -105,11 +118,53 @@ const routeNodes = [["8 分钟", "沿安静街道慢慢走", "不必抵达哪里
 
 function PlanScreen({ input, next, back }: { input: InputState; next: () => void; back: () => void }) {
   const [open, setOpen] = useState(true);
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [weatherStatus, setWeatherStatus] = useState<"loading" | "live" | "fallback">("loading");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12000);
+
+    fetch(`${YUBAI_API_BASE}/weather`, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    })
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok || data.ok !== true) throw new Error("weather unavailable");
+        return data as WeatherData;
+      })
+      .then(data => {
+        setWeather(data);
+        setWeatherStatus("live");
+      })
+      .catch(() => setWeatherStatus("fallback"))
+      .finally(() => window.clearTimeout(timeout));
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, []);
+
   const duration = Math.min(32, Math.max(18, input.time - 5));
   const intensity = input.energy <= 40 ? "低强度" : input.energy <= 70 ? "中低强度" : "适度探索";
-  return <section className="screen scroll-screen"><Header title="今日漫游" back={back} /><main className="page plan-page"><div className="weather"><span><Cloud />多云 · 24℃</span><span><Map />模拟环境</span></div><div className="eyebrow"><Sparkles />AI 生成漫游主题</div><h1>让密集的思绪<br />出现一点间隙</h1><p className="lead">今天不需要去很多地方，只需要一个不会催促你的外界。</p><div className="theme-tags"><span>低社交</span><span>慢步漫游</span><span>城市绿荫</span><span>短暂停留</span></div>
+  const temperature = Number(weather?.temperature);
+  const humidity = Number(weather?.humidity);
+  const hasRain = Boolean(weather && /雨|雪|雷/.test(weather.weather));
+  const weatherGuidance = weatherStatus === "live"
+    ? hasRain
+      ? "当前可能有降水，优先选择有遮蔽、容易返回的节点"
+      : temperature >= 32
+        ? "当前气温较高，优先选择树荫并减少连续步行"
+        : humidity >= 85
+          ? "当前湿度较高，降低步速并保留随时停下的余地"
+          : "当前环境适合短时、低强度的户外停留"
+    : "天气暂未连通，路线仍按低强度与容易返回生成";
+  const reportTime = weather?.reportTime?.split(" ")[1]?.slice(0, 5);
+  return <section className="screen scroll-screen"><Header title="今日漫游" back={back} /><main className="page plan-page"><div className={`weather weather-${weatherStatus}`}><span><Cloud />{weatherStatus === "loading" ? "正在感知城市环境…" : weatherStatus === "live" ? `${weather?.weather} · ${weather?.temperature}℃` : "环境数据暂不可用"}</span><span><Map />{weatherStatus === "live" ? `高德实时数据${reportTime ? ` · ${reportTime}` : ""}` : weatherStatus === "loading" ? "南山区" : "已启用安全回退"}</span></div>{weatherStatus === "live" && weather && <div className="weather-context" aria-label="实时环境信息"><span>湿度 {weather.humidity}%</span><span>{weather.windDirection}风 {weather.windPower}级</span><span>{weather.area.city}</span></div>}<div className="eyebrow"><Sparkles />AI 生成漫游主题</div><h1>让密集的思绪<br />出现一点间隙</h1><p className="lead">今天不需要去很多地方，只需要一个不会催促你的外界。</p><div className="theme-tags"><span>低社交</span><span>慢步漫游</span><span>城市绿荫</span><span>短暂停留</span></div>
     <section className="plan-summary" aria-label="路线概览"><div><small>预计时长</small><b>{duration} 分钟</b></div><div><small>移动强度</small><b>{intensity}</b></div><div><small>社交暴露</small><b>{input.social === "独处" ? "很低" : "较低"}</b></div></section>
-    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div><p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。</p><ul><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>多云微风：适合短时、低强度户外停留</li></ul></div>}</section>
+    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div><p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。</p><ul><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>城市环境：{weatherGuidance}</li></ul></div>}</section>
     <section className="route-list"><header><span>三个漫游节点</span><small>约 {duration} 分钟</small></header>{routeNodes.map(([time, title, text, Icon], i) => <article key={title} style={{ "--delay": `${i * 70}ms` } as React.CSSProperties}><i><Icon /></i><div><small>0{i + 1} · {time}</small><h3>{title}</h3><p>{text}</p></div></article>)}</section><div className="safety-note"><ShieldCheck />你可以随时调整、跳过节点或提前结束。</div><PrimaryButton onClick={next}>准备好，一起出发</PrimaryButton>
   </main></section>;
 }
