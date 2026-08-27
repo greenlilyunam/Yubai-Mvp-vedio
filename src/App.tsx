@@ -25,6 +25,40 @@ type WeatherData = {
   windDirection: string;
   windPower: string;
 };
+type RouteStop = {
+  id: string;
+  name: string;
+  address: string;
+  category: string;
+  sequence: number;
+  distanceMeters: number;
+  suggestedAction: string;
+  suggestedStayMinutes: number;
+  fieldVerified: boolean;
+};
+type RouteData = {
+  ok: true;
+  routeStatus: string;
+  source: string;
+  origin: { id: string; name: string; location: { longitude: number; latitude: number } };
+  stops: RouteStop[];
+  legs: Array<{
+    from: string;
+    to: string;
+    distanceMeters: number;
+    durationSeconds: number;
+    instructions: Array<{ instruction: string; road: string; distanceMeters: number }>;
+  }>;
+  summary: {
+    walkingDistanceMeters: number;
+    walkingDurationMinutes: number;
+    suggestedStayMinutes: number;
+    flexiblePauseMinutes: number;
+    estimatedTotalMinutes: number;
+    requestedMinutes: number;
+  };
+  fitExplanation: string[];
+};
 
 const YUBAI_API_BASE = (import.meta.env.VITE_YUBAI_API_BASE || "https://yubai-api-nuoztsegcf.cn-shenzhen.fcapp.run").replace(/\/$/, "");
 
@@ -84,7 +118,7 @@ function InputScreen({ value, setValue, next }: { value: InputState; setValue: (
   return <section className="screen scroll-screen"><Header /><main className="page input-page">
     <div className="eyebrow"><Sparkles />出发前的轻轻一问</div><h1>此刻的你，<br />需要怎样的余白？</h1><p className="lead">没有正确答案，只要尽量接近此刻。</p>
     <section className="form-card energy-card"><div className="form-row"><span><BatteryMedium />当前能量</span><b>{value.energy}%</b></div><input aria-label="当前能量" type="range" min="10" max="100" step="10" value={value.energy} onChange={e => setValue({ ...value, energy: +e.target.value })} /><small><span>需要照顾</span><span>很有余力</span></small></section>
-    <section className="form-card time-card"><div className="form-row"><span><Clock3 />可用时间</span><div className="stepper"><button onClick={() => setValue({ ...value, time: Math.max(15, value.time - 5) })}><Minus /></button><b>{value.time}</b><button onClick={() => setValue({ ...value, time: Math.min(90, value.time + 5) })}><Plus /></button></div></div></section>
+    <section className="form-card time-card"><div className="form-row"><span><Clock3 />可用时间</span><div className="stepper"><button onClick={() => setValue({ ...value, time: Math.max(20, value.time - 5) })}><Minus /></button><b>{value.time}</b><button onClick={() => setValue({ ...value, time: Math.min(90, value.time + 5) })}><Plus /></button></div></div></section>
     <section className="form-card"><label><Users />今天的社交边界</label><div className="pill-row">{(["独处", "轻微接触", "开放交流"] as const).map(x => <button key={x} className={value.social === x ? "active" : ""} onClick={() => setValue({ ...value, social: x })}>{value.social === x && <Check />}{x}</button>)}</div></section>
     <section className="form-card"><label><Footprints />行动倾向</label><div className="choice-list">{actions.map(([name, text, Icon]) => <button key={name} className={value.action === name ? "selected" : ""} onClick={() => setValue({ ...value, action: name })}><Icon /><span><b>{name}</b><small>{text}</small></span><i>{value.action === name && <Check />}</i></button>)}</div></section>
     <section className="form-card"><label><MessageCircleMore />还有什么想告诉我？</label><textarea value={value.description} onChange={e => setValue({ ...value, description: e.target.value })} placeholder="比如：脑子很乱，一直待在宿舍更难受……" /></section>
@@ -114,12 +148,22 @@ function NegotiationScreen({ input, selected, setSelected, custom, setCustom, ne
   </main></section>;
 }
 
-const routeNodes = [["8 分钟", "沿安静街道慢慢走", "不必抵达哪里，只关注脚步从室内节奏里松开。", Footprints], ["10 分钟", "找一处正在变化的东西", "可能是风吹过的叶片，也可能是墙面移动的光。", Wind], ["12 分钟", "留下“有呼吸感”的空间", "拍下来，或只用眼睛记住它，都可以。", Camera]] as const;
+const fallbackRouteNodes = [["8 分钟", "沿安静街道慢慢走", "不必抵达哪里，只关注脚步从室内节奏里松开。", Footprints], ["10 分钟", "找一处正在变化的东西", "可能是风吹过的叶片，也可能是墙面移动的光。", Wind], ["12 分钟", "留下“有呼吸感”的空间", "拍下来，或只用眼睛记住它，都可以。", Camera]] as const;
+
+function routeIcon(category: string) {
+  if (category === "自然空间") return Leaf;
+  if (category === "阅读空间") return Map;
+  if (category === "公共空间") return Compass;
+  if (category === "停留空间") return Wind;
+  return Sparkles;
+}
 
 function PlanScreen({ input, next, back }: { input: InputState; next: () => void; back: () => void }) {
   const [open, setOpen] = useState(true);
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<"loading" | "live" | "fallback">("loading");
+  const [route, setRoute] = useState<RouteData | null>(null);
+  const [routeStatus, setRouteStatus] = useState<"loading" | "live" | "fallback">("loading");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -147,7 +191,43 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
     };
   }, []);
 
-  const duration = Math.min(32, Math.max(18, input.time - 5));
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    const social = input.social === "独处" ? "low" : input.social === "轻微接触" ? "medium" : "high";
+    const query = new URLSearchParams({
+      energy: String(input.energy),
+      minutes: String(input.time),
+      social,
+    });
+
+    setRouteStatus("loading");
+    fetch(`${YUBAI_API_BASE}/route?${query}`, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    })
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok || data.ok !== true) throw new Error("route unavailable");
+        return data as RouteData;
+      })
+      .then(data => {
+        setRoute(data);
+        setRouteStatus("live");
+      })
+      .catch(() => {
+        setRoute(null);
+        setRouteStatus("fallback");
+      })
+      .finally(() => window.clearTimeout(timeout));
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [input.energy, input.social, input.time]);
+
+  const duration = routeStatus === "live" && route ? route.summary.estimatedTotalMinutes : Math.min(32, Math.max(18, input.time - 5));
   const intensity = input.energy <= 40 ? "低强度" : input.energy <= 70 ? "中低强度" : "适度探索";
   const temperature = Number(weather?.temperature);
   const humidity = Number(weather?.humidity);
@@ -162,10 +242,30 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
           : "当前环境适合短时、低强度的户外停留"
     : "天气暂未连通，路线仍按低强度与容易返回生成";
   const reportTime = weather?.reportTime?.split(" ")[1]?.slice(0, 5);
-  return <section className="screen scroll-screen"><Header title="今日漫游" back={back} /><main className="page plan-page"><div className={`weather weather-${weatherStatus}`}><span><Cloud />{weatherStatus === "loading" ? "正在感知城市环境…" : weatherStatus === "live" ? `${weather?.weather} · ${weather?.temperature}℃` : "环境数据暂不可用"}</span><span><Map />{weatherStatus === "live" ? `高德实时数据${reportTime ? ` · ${reportTime}` : ""}` : weatherStatus === "loading" ? "南山区" : "已启用安全回退"}</span></div>{weatherStatus === "live" && weather && <div className="weather-context" aria-label="实时环境信息"><span>湿度 {weather.humidity}%</span><span>{weather.windDirection}风 {weather.windPower}级</span><span>{weather.area.city}</span></div>}<div className="eyebrow"><Sparkles />AI 生成漫游主题</div><h1>让密集的思绪<br />出现一点间隙</h1><p className="lead">今天不需要去很多地方，只需要一个不会催促你的外界。</p><div className="theme-tags"><span>低社交</span><span>慢步漫游</span><span>城市绿荫</span><span>短暂停留</span></div>
-    <section className="plan-summary" aria-label="路线概览"><div><small>预计时长</small><b>{duration} 分钟</b></div><div><small>移动强度</small><b>{intensity}</b></div><div><small>社交暴露</small><b>{input.social === "独处" ? "很低" : "较低"}</b></div></section>
-    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div><p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。</p><ul><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>城市环境：{weatherGuidance}</li></ul></div>}</section>
-    <section className="route-list"><header><span>三个漫游节点</span><small>约 {duration} 分钟</small></header>{routeNodes.map(([time, title, text, Icon], i) => <article key={title} style={{ "--delay": `${i * 70}ms` } as React.CSSProperties}><i><Icon /></i><div><small>0{i + 1} · {time}</small><h3>{title}</h3><p>{text}</p></div></article>)}</section><div className="safety-note"><ShieldCheck />你可以随时调整、跳过节点或提前结束。</div><PrimaryButton onClick={next}>准备好，一起出发</PrimaryButton>
+  const socialExposure = input.social === "独处" ? "很低" : input.social === "轻微接触" ? "较低" : "可接触";
+  const planNodes = routeStatus === "live" && route
+    ? route.stops.map((stop, index) => {
+      const leg = route.legs[index];
+      const walkingMinutes = Math.max(1, Math.round((leg?.durationSeconds || 0) / 60));
+      return {
+        time: `步行 ${walkingMinutes} 分钟 · 停留 ${stop.suggestedStayMinutes} 分钟`,
+        title: stop.name,
+        text: stop.suggestedAction,
+        Icon: routeIcon(stop.category),
+        evidence: `${stop.category} · 高德真实地点${stop.fieldVerified ? " · 已实地核验" : " · 待实地核验"}`,
+      };
+    })
+    : fallbackRouteNodes.map(([time, title, text, Icon]) => ({ time, title, text, Icon, evidence: "演示节点" }));
+  const routeEvidence = routeStatus === "live" && route
+    ? `高德步行规划 · ${(route.summary.walkingDistanceMeters / 1000).toFixed(2)} 公里 · 步行 ${route.summary.walkingDurationMinutes} 分钟`
+    : routeStatus === "loading"
+      ? "正在计算真实步行路线…"
+      : "路线接口暂不可用，当前展示安全演示方案";
+  return <section className="screen scroll-screen"><Header title="今日漫游" back={back} /><main className="page plan-page"><div className={`weather weather-${weatherStatus}`}><span><Cloud />{weatherStatus === "loading" ? "正在感知城市环境…" : weatherStatus === "live" ? `${weather?.weather} · ${weather?.temperature}℃` : "环境数据暂不可用"}</span><span><Map />{weatherStatus === "live" ? `高德实时数据${reportTime ? ` · ${reportTime}` : ""}` : weatherStatus === "loading" ? "南山区" : "已启用安全回退"}</span></div>{weatherStatus === "live" && weather && <div className="weather-context" aria-label="实时环境信息"><span>湿度 {weather.humidity}%</span><span>{weather.windDirection}风 {weather.windPower}级</span><span>{weather.area.city}</span></div>}<div className="eyebrow"><Sparkles />AI 生成漫游主题</div><h1>让密集的思绪<br />出现一点间隙</h1><p className="lead">今天不需要去很多地方，只需要一个不会催促你的外界。</p><div className="theme-tags"><span>{input.social}</span><span>{input.action}</span><span>真实步行路线</span><span>可随时跳过</span></div>
+    <section className="plan-summary" aria-label="路线概览"><div><small>预计时长</small><b>{duration} 分钟</b></div><div><small>移动强度</small><b>{intensity}</b></div><div><small>社交暴露</small><b>{socialExposure}</b></div></section>
+    <div className={`route-evidence route-evidence-${routeStatus}`} role="status"><Route />{routeEvidence}</div>
+    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div><p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。</p><ul>{routeStatus === "live" && route ? route.fitExplanation.map(reason => <li key={reason}>{reason}</li>) : <><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>城市环境：{weatherGuidance}</li></>}</ul></div>}</section>
+    <section className="route-list"><header><span>{routeStatus === "live" ? `${planNodes.length} 个真实地点节点` : `${planNodes.length} 个漫游节点`}</span><small>约 {duration} 分钟</small></header>{planNodes.map(({ time, title, text, Icon, evidence }, i) => <article key={`${title}-${i}`} style={{ "--delay": `${i * 70}ms` } as React.CSSProperties}><i><Icon /></i><div><small>0{i + 1} · {time}</small><h3>{title}</h3><p>{text}</p><em>{evidence}</em></div></article>)}</section><div className="safety-note"><ShieldCheck />地点体验仍需实地核验；你可以随时跳过节点或提前结束。</div><PrimaryButton onClick={next}>准备好，一起出发</PrimaryButton>
   </main></section>;
 }
 
