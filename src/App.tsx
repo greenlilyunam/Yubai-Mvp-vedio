@@ -32,6 +32,7 @@ type RouteStop = {
   category: string;
   sequence: number;
   distanceMeters: number;
+  location: { longitude: number; latitude: number };
   suggestedAction: string;
   suggestedStayMinutes: number;
   fieldVerified: boolean;
@@ -61,6 +62,36 @@ type RouteData = {
 };
 
 const YUBAI_API_BASE = (import.meta.env.VITE_YUBAI_API_BASE || "https://yubai-api-nuoztsegcf.cn-shenzhen.fcapp.run").replace(/\/$/, "");
+
+function requestRoute(input: InputState, signal: AbortSignal) {
+  const social = input.social === "独处" ? "low" : input.social === "轻微接触" ? "medium" : "high";
+  const query = new URLSearchParams({
+    energy: String(input.energy),
+    minutes: String(input.time),
+    social,
+  });
+  return fetch(`${YUBAI_API_BASE}/route?${query}`, {
+    headers: { Accept: "application/json" },
+    signal,
+  }).then(async response => {
+    const data = await response.json();
+    if (!response.ok || data.ok !== true) throw new Error("route unavailable");
+    return data as RouteData;
+  });
+}
+
+function amapNavigationUrl(route: RouteData, stopIndex: number) {
+  const from = stopIndex === 0 ? route.origin : route.stops[stopIndex - 1];
+  const to = route.stops[stopIndex];
+  const query = new URLSearchParams({
+    from: `${from.location.longitude},${from.location.latitude},${from.name}`,
+    to: `${to.location.longitude},${to.location.latitude},${to.name}`,
+    mode: "walk",
+    src: "yubai-mvp",
+    callnative: "0",
+  });
+  return `https://uri.amap.com/navigation?${query}`;
+}
 
 const adjustments = {
   noise: {
@@ -158,7 +189,12 @@ function routeIcon(category: string) {
   return Sparkles;
 }
 
-function PlanScreen({ input, next, back }: { input: InputState; next: () => void; back: () => void }) {
+function displayPlaceName(name: string) {
+  if (name.includes("平山公园")) return "平山公园";
+  return name.replace("(桃源分馆)", "·桃源分馆");
+}
+
+function PlanScreen({ input, next, back, onRouteLoaded }: { input: InputState; next: () => void; back: () => void; onRouteLoaded: (route: RouteData) => void }) {
   const [open, setOpen] = useState(true);
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<"loading" | "live" | "fallback">("loading");
@@ -194,25 +230,11 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
   useEffect(() => {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 20000);
-    const social = input.social === "独处" ? "low" : input.social === "轻微接触" ? "medium" : "high";
-    const query = new URLSearchParams({
-      energy: String(input.energy),
-      minutes: String(input.time),
-      social,
-    });
-
     setRouteStatus("loading");
-    fetch(`${YUBAI_API_BASE}/route?${query}`, {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    })
-      .then(async response => {
-        const data = await response.json();
-        if (!response.ok || data.ok !== true) throw new Error("route unavailable");
-        return data as RouteData;
-      })
+    requestRoute(input, controller.signal)
       .then(data => {
         setRoute(data);
+        onRouteLoaded(data);
         setRouteStatus("live");
       })
       .catch(() => {
@@ -225,7 +247,7 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [input.energy, input.social, input.time]);
+  }, [input, onRouteLoaded]);
 
   const duration = routeStatus === "live" && route ? route.summary.estimatedTotalMinutes : Math.min(32, Math.max(18, input.time - 5));
   const intensity = input.energy <= 40 ? "低强度" : input.energy <= 70 ? "中低强度" : "适度探索";
@@ -249,7 +271,7 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
       const walkingMinutes = Math.max(1, Math.round((leg?.durationSeconds || 0) / 60));
       return {
         time: `步行 ${walkingMinutes} 分钟 · 停留 ${stop.suggestedStayMinutes} 分钟`,
-        title: stop.name,
+        title: displayPlaceName(stop.name),
         text: stop.suggestedAction,
         Icon: routeIcon(stop.category),
         evidence: `${stop.category} · 高德真实地点${stop.fieldVerified ? " · 已实地核验" : " · 待实地核验"}`,
@@ -269,10 +291,24 @@ function PlanScreen({ input, next, back }: { input: InputState; next: () => void
   </main></section>;
 }
 
-function JourneyScreen({ feedback, finish, notice, node, advance }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void }) {
-  const stateClass = (index: number) => index < node ? "done" : index === node ? "active" : "";
-  return <section className="screen scroll-screen journey-screen"><Header title="感知路径" /><main className="page journey-page"><div className="journey-status"><i /><span>余白正在陪你漫游</span><b>{node}/3 · {node === 2 ? "12" : "24"} 分钟</b></div>{notice && <div className="journey-notice" role="status"><Check />{notice}</div>}<h1>跟随这些节点，<br />重新连接环境的纹理。</h1><p className="lead">没有完成度，也没有标准答案；任何节点都可以跳过。</p>
-    <section className="journey-timeline"><article className={stateClass(1)}><i>{node > 1 ? <Check /> : 1}</i><div><small>{node > 1 ? "完成" : "现在"}</small><h3>断开屏幕</h3><p>走出住所，让眼睛重新适应远处。</p></div></article><article className={stateClass(2)}><i>{node > 2 ? <Check /> : 2}</i><div><small>{node > 2 ? "完成" : node === 2 ? "现在" : "下一步"}</small><h3>触碰自然</h3><p>{notice.includes("光影") ? "观察一处缓慢变化的光影。" : notice.includes("休息") ? "在附近有座位的树荫下停留。" : "听风的声音，观察地面上的光。"}</p>{node === 2 && <span><Sparkles />此节点保持低刺激，不要求与人互动</span>}</div></article><article className={stateClass(3)}><i>3</i><div><small>{node === 3 ? "现在" : "下一步"}</small><h3>{notice.includes("林荫") ? "继续进入林荫路" : "留下一处空间"}</h3><p>{notice.includes("林荫") ? "寻找两种同时出现的自然颜色。" : "拍下一处让你感觉有呼吸感的空间。"}</p>{node === 3 && <span><Sparkles />可以拍下来，也可以只记住它</span>}</div></article></section><button className="finish-button" onClick={node < 3 ? advance : finish}>{node < 3 ? "完成当前节点" : "完成本次感知"}</button><button className="feedback-button" onClick={feedback}><Sparkles />此刻感觉怎么样？</button>
+function JourneyScreen({ feedback, finish, notice, node, advance, route }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void; route: RouteData | null }) {
+  const hasLiveRoute = Boolean(route?.stops.length);
+  const total = hasLiveRoute ? route!.stops.length : 3;
+  const currentNode = Math.min(node, total);
+  const currentStop = hasLiveRoute ? route!.stops[currentNode - 1] : null;
+  const currentLeg = hasLiveRoute ? route!.legs[currentNode - 1] : null;
+  const stateClass = (index: number) => index < currentNode ? "done" : index === currentNode ? "active" : "";
+  const currentWalkingMinutes = currentLeg ? Math.max(1, Math.round(currentLeg.durationSeconds / 60)) : currentNode === 2 ? 12 : 8;
+  const originName = currentNode === 1 ? route?.origin.name : route?.stops[currentNode - 2]?.name;
+
+  return <section className="screen scroll-screen journey-screen"><Header title="感知路径" /><main className="page journey-page"><div className="journey-status"><i /><span>{hasLiveRoute ? "正在跟随真实地点路线" : "正在载入地点路线"}</span><b>{currentNode}/{total} · 步行 {currentWalkingMinutes} 分钟</b></div>{notice && <div className="journey-notice" role="status"><Check />{notice}</div>}<h1>{currentStop ? <>去往{displayPlaceName(currentStop.name)}，<br />让感知发生在真实地点。</> : <>跟随这些节点，<br />重新连接环境的纹理。</>}</h1><p className="lead">{currentStop && currentLeg ? `从${originName ? displayPlaceName(originName) : "上一节点"}出发，本段约 ${currentLeg.distanceMeters} 米。抵达后停留 ${currentStop.suggestedStayMinutes} 分钟。` : "真实路线载入前先保持低强度；任何节点都可以跳过。"}</p>
+    {hasLiveRoute && route ? <section className="journey-timeline journey-live">{route.stops.map((stop, index) => {
+      const itemNode = index + 1;
+      const leg = route.legs[index];
+      const Icon = routeIcon(stop.category);
+      const walkingMinutes = Math.max(1, Math.round((leg?.durationSeconds || 0) / 60));
+      return <article key={stop.id} className={stateClass(itemNode)}><i>{itemNode < currentNode ? <Check /> : itemNode}</i><div><small>{itemNode < currentNode ? "已完成" : itemNode === currentNode ? "现在前往" : "下一地点"} · 步行 {walkingMinutes} 分钟</small><h3>{displayPlaceName(stop.name)}</h3><p>{stop.suggestedAction}</p><aside className="journey-place-meta"><span><Icon />{stop.category}</span><span><Footprints />{leg?.distanceMeters || 0} 米</span><span><Clock3 />停留 {stop.suggestedStayMinutes} 分钟</span></aside><a className="amap-link" href={amapNavigationUrl(route, index)} target="_blank" rel="noreferrer"><Route />在高德查看本段步行路线</a>{itemNode === currentNode && <span className="journey-place-note"><Sparkles />任务来自这个地点的空间类型，不是随机文案</span>}</div></article>;
+    })}</section> : <section className="journey-timeline"><article className={stateClass(1)}><i>{currentNode > 1 ? <Check /> : 1}</i><div><small>{currentNode > 1 ? "完成" : "现在"}</small><h3>断开屏幕</h3><p>走出住所，让眼睛重新适应远处。</p></div></article><article className={stateClass(2)}><i>{currentNode > 2 ? <Check /> : 2}</i><div><small>{currentNode > 2 ? "完成" : currentNode === 2 ? "现在" : "下一步"}</small><h3>触碰自然</h3><p>听风的声音，观察地面上的光。</p></div></article><article className={stateClass(3)}><i>3</i><div><small>{currentNode === 3 ? "现在" : "下一步"}</small><h3>留下一处空间</h3><p>拍下一处让你感觉有呼吸感的空间。</p></div></article></section>}<div className="journey-location-boundary"><ShieldCheck />到达与完成由你手动确认，余白不会持续上传实时位置。</div><button className="finish-button" onClick={currentNode < total ? advance : finish}>{currentNode < total ? `完成“${currentStop ? displayPlaceName(currentStop.name) : "当前节点"}”` : "完成本次感知"}</button><button className="feedback-button" onClick={feedback}><Sparkles />此刻感觉怎么样？</button>
   </main></section>;
 }
 
@@ -304,10 +340,23 @@ export default function App() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []); const requested = params.get("screen");
   const valid: Step[] = ["splash", "home", "world", "resonance", "map", "mapAdd", "mapEntry", "profile", "card", "input", "thinking", "negotiate", "plan", "journey", "adjust", "reflection", "done"];
   const initialStep: Step = requested === "feedback" ? "journey" : valid.includes(requested as Step) ? requested as Step : "splash";
-  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(2); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false);
+  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null);
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
+  useEffect(() => {
+    if (step !== "journey" || liveRoute) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    requestRoute(input, controller.signal)
+      .then(setLiveRoute)
+      .catch(() => undefined)
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [input, liveRoute, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
-  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(2); setSelected("理解得很准确"); setCustom(""); };
+  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setSelected("理解得很准确"); setCustom(""); };
   const navigateHub = (tab: HubTab) => setStep(tab);
   const beginJourney = (action: InputState["action"]) => { setInput({ ...input, action }); setStep("input"); };
   const progress = stepProgress[step];
@@ -321,6 +370,6 @@ export default function App() {
     {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} />}
     {step === "profile" && <ProfileScreen navigate={navigateHub} />}
     {step === "card" && <ResultCardScreen saveToMap={() => { setMapSaved(true); setStep("map"); }} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} />}{step === "plan" && <PlanScreen input={input} next={() => setStep("journey")} back={() => setStep("negotiate")} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(3, journeyNode + 1))} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }
