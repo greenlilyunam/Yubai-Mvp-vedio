@@ -60,15 +60,58 @@ type RouteData = {
   };
   fitExplanation: string[];
 };
+type RoutePreference = "balanced" | "calm" | "sheltered" | "inspiration" | "social";
+type InterpretationData = {
+  ok: true;
+  source: string;
+  model: string;
+  interpretation: {
+    summary: string;
+    needs: string[];
+    avoid: string[];
+    routePreference: RoutePreference;
+    confidence: string;
+    boundaryNotice: string;
+  };
+  privacy: {
+    sentFields: string[];
+    excludedFields: string[];
+    storedByYubai: boolean;
+  };
+  humanControl: string;
+  usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+};
 
 const YUBAI_API_BASE = (import.meta.env.VITE_YUBAI_API_BASE || "https://yubai-api-nuoztsegcf.cn-shenzhen.fcapp.run").replace(/\/$/, "");
 
-function requestRoute(input: InputState, signal: AbortSignal) {
+function requestInterpretation(input: InputState, signal: AbortSignal) {
+  return fetch(`${YUBAI_API_BASE}/interpret`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      energy: input.energy,
+      minutes: input.time,
+      social: input.social,
+      action: input.action,
+    }),
+    signal,
+  }).then(async response => {
+    const data = await response.json();
+    if (!response.ok || data.ok !== true) throw new Error("interpretation unavailable");
+    return data as InterpretationData;
+  });
+}
+
+function requestRoute(input: InputState, signal: AbortSignal, preference: RoutePreference = "balanced") {
   const social = input.social === "独处" ? "low" : input.social === "轻微接触" ? "medium" : "high";
   const query = new URLSearchParams({
     energy: String(input.energy),
     minutes: String(input.time),
     social,
+    preference,
   });
   return fetch(`${YUBAI_API_BASE}/route?${query}`, {
     headers: { Accept: "application/json" },
@@ -115,6 +158,13 @@ const adjustments = {
 } satisfies Record<Branch, { title: string; body: string; notice: string; rows: string[][] }>;
 
 const negotiationOptions = ["理解得很准确", "我想再安静一些", "我其实想接触一点人", "不想走太远", "更需要获得灵感"];
+
+function preferenceFromNegotiation(selected: string): RoutePreference | null {
+  if (selected === "我想再安静一些") return "calm";
+  if (selected === "我其实想接触一点人") return "social";
+  if (selected === "更需要获得灵感") return "inspiration";
+  return null;
+}
 
 const stepProgress: Record<Step, { value: number; label: string }> = {
   splash: { value: 0, label: "启动" },
@@ -163,19 +213,20 @@ function ThinkingScreen({ input, next }: { input: InputState; next: () => void }
   return <section className="screen thinking-screen" aria-live="polite"><div className="thinking-orbit"><i /><i /><span><Sparkles /></span><em>能量 · {input.energy}%</em><em>{input.social}边界</em><em>{input.time} 分钟</em></div><main><h2>正在整理此刻的你</h2><p>把能量、时间、社交边界和行动倾向放在一起理解</p><div><span /><span /><span /></div></main></section>;
 }
 
-function NegotiationScreen({ input, selected, setSelected, custom, setCustom, next, back }: { input: InputState; selected: string; setSelected: (v: string) => void; custom: string; setCustom: (v: string) => void; next: () => void; back: () => void }) {
+function NegotiationScreen({ input, selected, setSelected, custom, setCustom, next, back, interpretation, interpretationStatus }: { input: InputState; selected: string; setSelected: (v: string) => void; custom: string; setCustom: (v: string) => void; next: () => void; back: () => void; interpretation: InterpretationData | null; interpretationStatus: "loading" | "live" | "fallback" }) {
   const negotiation = useMemo(() => {
     if (selected === "我想再安静一些") return { text: "极低刺激、短时间离开室内，以及几乎不需要交流的自然接触。", tags: ["极低刺激", "避开主路", "轻微移动", "无需交流"], avoid: "我会避开主路、商业场所、突然出现的声音和需要完成任务的地点。" };
     if (selected === "我其实想接触一点人") return { text: "低压力的轻微移动，以及能看见他人、但不必主动交流的环境。", tags: ["轻微接触", "可随时退出", "缓慢移动", "保持距离"], avoid: "我会避开必须社交、持续对话和过度拥挤的场所。" };
     if (selected === "不想走太远") return { text: "在很短的移动半径里换一口气，并保留随时返回室内的余地。", tags: ["近距离", "容易返回", "低强度", "短暂停留"], avoid: "我会避开远距离路线、复杂转向和需要赶时间的节点。" };
     if (selected === "更需要获得灵感") return { text: "低压力地离开室内，同时接触一点光影、颜色和城市细节。", tags: ["温和刺激", "观察细节", "寻找灵感", "无需产出"], avoid: "我会避开强迫产出、打卡和需要立刻形成结论的任务。" };
+    if (interpretationStatus === "live" && interpretation) return { text: interpretation.interpretation.summary, tags: interpretation.interpretation.needs, avoid: interpretation.interpretation.avoid.length ? `我会尽量避开：${interpretation.interpretation.avoid.join("、")}。` : interpretation.interpretation.boundaryNotice };
     return { text: `${input.energy <= 40 ? "低刺激" : "适度刺激"}、短时间离开室内、轻微移动，以及${input.social === "独处" ? "不需要交流" : "低压力接触"}的自然体验。`, tags: [input.energy <= 40 ? "低刺激" : "适度刺激", `${input.time} 分钟内`, input.action, input.social], avoid: "我会避开拥挤、消费和需要完成任务的场所。" };
-  }, [input, selected]);
+  }, [input, interpretation, interpretationStatus, selected]);
   const negotiatedText = custom.trim() ? `${negotiation.text} 同时优先考虑：${custom.trim()}` : negotiation.text;
   return <section className="screen scroll-screen"><Header title="状态协商" back={back} /><main className="page negotiate-page"><div className="step-label"><b>01</b>先对齐，再出发</div><h1>我先试着理解你</h1><p className="lead">你可以修正我，这里没有“绝对性的正确”。</p>
-    <section className="ai-quote" aria-live="polite"><div><Sparkles />余白 AI 的理解</div><p>我理解你今天需要的是：</p><h2>{negotiatedText}</h2><div className="need-tags">{negotiation.tags.map(tag => <span key={tag}>{tag}</span>)}</div><small><X />{negotiation.avoid}</small></section>
+    <section className="ai-quote" aria-live="polite"><div><Sparkles />{interpretationStatus === "live" && interpretation ? `百炼 ${interpretation.model} · 初步理解` : interpretationStatus === "loading" ? "百炼正在理解 · 可先修正" : "本地安全理解 · 百炼暂不可用"}</div><p>我理解你今天需要的是：</p><h2>{negotiatedText}</h2><div className="need-tags">{negotiation.tags.map(tag => <span key={tag}>{tag}</span>)}</div><small><X />{negotiation.avoid}</small></section>
     <section className="negotiation-options"><h3>这个理解离你有多近？</h3>{negotiationOptions.map(x => <button key={x} className={selected === x ? "selected" : ""} aria-pressed={selected === x} onClick={() => setSelected(x)}><span>{x}</span>{selected === x ? <Check /> : <ArrowRight />}</button>)}<label className={custom.trim() ? "has-value" : ""}><input value={custom} onChange={e => setCustom(e.target.value)} placeholder="自定义补充……" /><Pencil /></label>{custom.trim() && <small className="live-correction"><Check />已加入本次状态理解</small>}</section>
-    <div className="coedit-note"><Sparkles />你的修正只作用于本次漫游，除非你在结束时选择保留。</div><PrimaryButton onClick={next}>这个理解可以继续</PrimaryButton>
+    <div className="coedit-note"><ShieldCheck />百炼只接收能量、时间、社交和行动；自定义文字不发送。预设修正会在本地改变路线偏好。</div><PrimaryButton onClick={next}>这个理解可以继续</PrimaryButton>
   </main></section>;
 }
 
@@ -194,12 +245,14 @@ function displayPlaceName(name: string) {
   return name.replace("(桃源分馆)", "·桃源分馆");
 }
 
-function PlanScreen({ input, next, back, onRouteLoaded }: { input: InputState; next: () => void; back: () => void; onRouteLoaded: (route: RouteData) => void }) {
+function PlanScreen({ input, next, back, onRouteLoaded, initialInterpretation, selectedNegotiation }: { input: InputState; next: () => void; back: () => void; onRouteLoaded: (route: RouteData) => void; initialInterpretation: InterpretationData | null; selectedNegotiation: string }) {
   const [open, setOpen] = useState(true);
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<"loading" | "live" | "fallback">("loading");
   const [route, setRoute] = useState<RouteData | null>(null);
   const [routeStatus, setRouteStatus] = useState<"loading" | "live" | "fallback">("loading");
+  const [interpretation, setInterpretation] = useState<InterpretationData | null>(initialInterpretation);
+  const [interpretationStatus, setInterpretationStatus] = useState<"loading" | "live" | "fallback">(initialInterpretation ? "live" : "loading");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -229,9 +282,24 @@ function PlanScreen({ input, next, back, onRouteLoaded }: { input: InputState; n
 
   useEffect(() => {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    const timeout = window.setTimeout(() => controller.abort(), 35000);
     setRouteStatus("loading");
-    requestRoute(input, controller.signal)
+    setInterpretationStatus("loading");
+    const interpretationRequest = initialInterpretation
+      ? Promise.resolve(initialInterpretation)
+      : requestInterpretation(input, controller.signal);
+    interpretationRequest
+      .then(data => {
+        setInterpretation(data);
+        setInterpretationStatus("live");
+        return preferenceFromNegotiation(selectedNegotiation) || data.interpretation.routePreference;
+      })
+      .catch(() => {
+        setInterpretation(null);
+        setInterpretationStatus("fallback");
+        return preferenceFromNegotiation(selectedNegotiation) || "balanced";
+      })
+      .then(preference => requestRoute(input, controller.signal, preference))
       .then(data => {
         setRoute(data);
         onRouteLoaded(data);
@@ -247,7 +315,7 @@ function PlanScreen({ input, next, back, onRouteLoaded }: { input: InputState; n
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [input, onRouteLoaded]);
+  }, [initialInterpretation, input, onRouteLoaded, selectedNegotiation]);
 
   const duration = routeStatus === "live" && route ? route.summary.estimatedTotalMinutes : Math.min(32, Math.max(18, input.time - 5));
   const intensity = input.energy <= 40 ? "低强度" : input.energy <= 70 ? "中低强度" : "适度探索";
@@ -286,7 +354,7 @@ function PlanScreen({ input, next, back, onRouteLoaded }: { input: InputState; n
   return <section className="screen scroll-screen"><Header title="今日漫游" back={back} /><main className="page plan-page"><div className={`weather weather-${weatherStatus}`}><span><Cloud />{weatherStatus === "loading" ? "正在感知城市环境…" : weatherStatus === "live" ? `${weather?.weather} · ${weather?.temperature}℃` : "环境数据暂不可用"}</span><span><Map />{weatherStatus === "live" ? `高德实时数据${reportTime ? ` · ${reportTime}` : ""}` : weatherStatus === "loading" ? "南山区" : "已启用安全回退"}</span></div>{weatherStatus === "live" && weather && <div className="weather-context" aria-label="实时环境信息"><span>湿度 {weather.humidity}%</span><span>{weather.windDirection}风 {weather.windPower}级</span><span>{weather.area.city}</span></div>}<div className="eyebrow"><Sparkles />AI 生成漫游主题</div><h1>让密集的思绪<br />出现一点间隙</h1><p className="lead">今天不需要去很多地方，只需要一个不会催促你的外界。</p><div className="theme-tags"><span>{input.social}</span><span>{input.action}</span><span>真实步行路线</span><span>可随时跳过</span></div>
     <section className="plan-summary" aria-label="路线概览"><div><small>预计时长</small><b>{duration} 分钟</b></div><div><small>移动强度</small><b>{intensity}</b></div><div><small>社交暴露</small><b>{socialExposure}</b></div></section>
     <div className={`route-evidence route-evidence-${routeStatus}`} role="status"><Route />{routeEvidence}</div>
-    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div><p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。</p><ul>{routeStatus === "live" && route ? route.fitExplanation.map(reason => <li key={reason}>{reason}</li>) : <><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>城市环境：{weatherGuidance}</li></>}</ul></div>}</section>
+    <section className="reason-card"><button aria-expanded={open} onClick={() => setOpen(!open)}><span><Sparkles />AI 为什么生成这条路线</span><ChevronDown className={open ? "open" : ""} /></button>{open && <div>{interpretationStatus === "live" && interpretation ? <><p>{interpretation.interpretation.summary}</p>{interpretation.interpretation.needs.length > 0 && <div className="ai-route-needs">{interpretation.interpretation.needs.map(need => <span key={need}>{need}</span>)}</div>}<p className="ai-privacy-proof"><ShieldCheck />百炼 {interpretation.model} · 仅发送能量、时间、社交、行动 · 余白不存储</p></> : <p>基于你 <b>{input.energy}% 的能量</b>、<b>{input.time} 分钟</b>可用时间和今天“{input.social}”的边界，我优先考虑恢复呼吸感，而不是追求新刺激。{interpretationStatus === "fallback" ? " 百炼暂不可用，已切换为本地安全规则。" : ""}</p>}<ul>{routeStatus === "live" && route ? route.fitExplanation.map(reason => <li key={reason}>{reason}</li>) : <><li>能量状态：控制步行距离和任务数量</li><li>社交边界：避开商业街与高人流区域</li><li>行动倾向：以“{input.action}”作为路线节奏</li><li>城市环境：{weatherGuidance}</li></>}</ul></div>}</section>
     <section className="route-list"><header><span>{routeStatus === "live" ? `${planNodes.length} 个真实地点节点` : `${planNodes.length} 个漫游节点`}</span><small>约 {duration} 分钟</small></header>{planNodes.map(({ time, title, text, Icon, evidence }, i) => <article key={`${title}-${i}`} style={{ "--delay": `${i * 70}ms` } as React.CSSProperties}><i><Icon /></i><div><small>0{i + 1} · {time}</small><h3>{title}</h3><p>{text}</p><em>{evidence}</em></div></article>)}</section><div className="safety-note"><ShieldCheck />地点体验仍需实地核验；你可以随时跳过节点或提前结束。</div><PrimaryButton onClick={next}>准备好，一起出发</PrimaryButton>
   </main></section>;
 }
@@ -340,8 +408,29 @@ export default function App() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []); const requested = params.get("screen");
   const valid: Step[] = ["splash", "home", "world", "resonance", "map", "mapAdd", "mapEntry", "profile", "card", "input", "thinking", "negotiate", "plan", "journey", "adjust", "reflection", "done"];
   const initialStep: Step = requested === "feedback" ? "journey" : valid.includes(requested as Step) ? requested as Step : "splash";
-  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null);
+  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading");
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
+  const shouldInterpret = step === "thinking" || step === "negotiate";
+  useEffect(() => {
+    if (!shouldInterpret) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 22000);
+    setAiInterpretationStatus("loading");
+    requestInterpretation(input, controller.signal)
+      .then(data => {
+        setAiInterpretation(data);
+        setAiInterpretationStatus("live");
+      })
+      .catch(() => {
+        setAiInterpretation(null);
+        setAiInterpretationStatus("fallback");
+      })
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [input, shouldInterpret]);
   useEffect(() => {
     if (step !== "journey" || liveRoute) return;
     const controller = new AbortController();
@@ -356,7 +445,7 @@ export default function App() {
     };
   }, [input, liveRoute, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
-  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setSelected("理解得很准确"); setCustom(""); };
+  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setSelected("理解得很准确"); setCustom(""); };
   const navigateHub = (tab: HubTab) => setStep(tab);
   const beginJourney = (action: InputState["action"]) => { setInput({ ...input, action }); setStep("input"); };
   const progress = stepProgress[step];
@@ -370,6 +459,6 @@ export default function App() {
     {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} />}
     {step === "profile" && <ProfileScreen navigate={navigateHub} />}
     {step === "card" && <ResultCardScreen saveToMap={() => { setMapSaved(true); setStep("map"); }} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }

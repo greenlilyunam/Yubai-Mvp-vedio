@@ -19,6 +19,8 @@ AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
 AMAP_PLACE_TEXT_URL = "https://restapi.amap.com/v5/place/text"
 AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v5/place/around"
 AMAP_WALKING_URL = "https://restapi.amap.com/v5/direction/walking"
+BAILIAN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+BAILIAN_DEFAULT_MODEL = "qwen-flash"
 
 DEFAULT_ADCODE = "440305"
 DEFAULT_STATION_KEYWORD = "大学城地铁站-C口"
@@ -78,6 +80,14 @@ ROUTE_ACTIONS = {
 
 
 class AmapError(Exception):
+    def __init__(self, code, message, http_status=502):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+
+
+class BailianError(Exception):
     def __init__(self, code, message, http_status=502):
         super().__init__(message)
         self.code = code
@@ -152,6 +162,83 @@ def amap_get(url, parameters, timeout=8):
         )
 
     return data
+
+
+def bailian_key():
+    key = env_value("DASHSCOPE_API_KEY")
+    if not key:
+        raise BailianError(
+            "BAILIAN_KEY_MISSING",
+            "服务器尚未配置百炼 API Key",
+            503,
+        )
+    return key
+
+
+def bailian_chat(messages, timeout=18):
+    base_url = env_value("BAILIAN_BASE_URL", BAILIAN_DEFAULT_BASE_URL).rstrip("/")
+    model = env_value("BAILIAN_MODEL", BAILIAN_DEFAULT_MODEL)
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_completion_tokens": 500,
+        "enable_thinking": False,
+        "response_format": {"type": "json_object"},
+    }, ensure_ascii=False).encode("utf-8")
+    model_request = Request(
+        base_url + "/chat/completions",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + bailian_key(),
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "User-Agent": "Yubai-MVP/1.0",
+        },
+    )
+
+    try:
+        with urlopen(model_request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise BailianError(
+            "BAILIAN_HTTP_ERROR",
+            "百炼模型服务暂时无法完成请求",
+            502,
+        ) from error
+    except (URLError, TimeoutError) as error:
+        raise BailianError(
+            "BAILIAN_NETWORK_ERROR",
+            "暂时无法连接百炼模型服务",
+            504,
+        ) from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BailianError(
+            "BAILIAN_RESPONSE_ERROR",
+            "百炼返回的数据格式异常",
+            502,
+        ) from error
+
+    choices = data.get("choices", [])
+    content = choices[0].get("message", {}).get("content") if choices else None
+    if not isinstance(content, str) or not content.strip():
+        raise BailianError(
+            "BAILIAN_EMPTY_RESPONSE",
+            "百炼没有返回可用的状态理解",
+            502,
+        )
+
+    try:
+        interpretation = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise BailianError(
+            "BAILIAN_JSON_ERROR",
+            "百炼没有返回标准 JSON 状态理解",
+            502,
+        ) from error
+
+    return interpretation, data, model
 
 
 def text_value(value):
@@ -397,6 +484,11 @@ def route_state():
         "energy": integer_query("energy", 30, 0, 100),
         "availableMinutes": integer_query("minutes", 40, 20, 90),
         "social": choice_query("social", "low", ("low", "medium", "high")),
+        "preference": choice_query(
+            "preference",
+            "balanced",
+            ("balanced", "calm", "sheltered", "inspiration", "social"),
+        ),
     }
 
 
@@ -431,8 +523,17 @@ def weather_requires_shelter(weather):
 
 
 def category_order(state, shelter_needed):
+    preference = state.get("preference", "balanced")
     if shelter_needed:
         order = ["阅读空间", "文化空间", "停留空间", "自然空间", "公共空间"]
+    elif preference == "sheltered":
+        order = ["阅读空间", "文化空间", "停留空间", "自然空间", "公共空间"]
+    elif preference == "inspiration":
+        order = ["文化空间", "自然空间", "阅读空间", "公共空间", "停留空间"]
+    elif preference == "social":
+        order = ["公共空间", "停留空间", "文化空间", "自然空间", "阅读空间"]
+    elif preference == "calm":
+        order = ["自然空间", "阅读空间", "文化空间", "公共空间", "停留空间"]
     elif state["energy"] <= 40:
         order = ["自然空间", "阅读空间", "文化空间", "公共空间", "停留空间"]
     else:
@@ -534,6 +635,14 @@ def route_explanation(state, weather, shelter_needed, stops):
     ]
     if state["social"] == "low":
         reasons.append("社交意愿低：公共免费空间优先，消费场所降级为备选")
+    preference_labels = {
+        "calm": "状态协商结果：优先自然与安静阅读空间",
+        "sheltered": "状态协商结果：优先室内或可遮蔽空间",
+        "inspiration": "状态协商结果：优先文化与观察型空间",
+        "social": "状态协商结果：优先可低压力接触他人的空间",
+    }
+    if state.get("preference") in preference_labels:
+        reasons.append(preference_labels[state["preference"]])
     if shelter_needed:
         reasons.append(
             f'当前{weather.get("weather")}、湿度{weather.get("humidity")}%：提高室内或可遮蔽空间优先级'
@@ -542,6 +651,50 @@ def route_explanation(state, weather, shelter_needed, stops):
     if stops:
         reasons.append("本次节点：" + " → ".join(stop["name"] for stop in stops))
     return reasons
+
+
+def limited_text(value, maximum=300):
+    return text_value(value).strip()[:maximum]
+
+
+def limited_text_list(value, maximum_items=4, maximum_length=80):
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value[:maximum_items]:
+        content = limited_text(item, maximum_length)
+        if content:
+            result.append(content)
+    return result
+
+
+def validate_interpretation(value):
+    if not isinstance(value, dict):
+        raise BailianError(
+            "BAILIAN_SCHEMA_ERROR",
+            "百炼状态理解缺少 JSON 对象",
+            502,
+        )
+    preference = limited_text(value.get("routePreference"), 20)
+    allowed_preferences = {"balanced", "calm", "sheltered", "inspiration", "social"}
+    if preference not in allowed_preferences:
+        preference = "balanced"
+    summary = limited_text(value.get("summary"), 220)
+    if not summary:
+        raise BailianError(
+            "BAILIAN_SCHEMA_ERROR",
+            "百炼状态理解缺少 summary",
+            502,
+        )
+    return {
+        "summary": summary,
+        "needs": limited_text_list(value.get("needs")),
+        "avoid": limited_text_list(value.get("avoid")),
+        "routePreference": preference,
+        "confidence": limited_text(value.get("confidence"), 30) or "需要用户确认",
+        "boundaryNotice": limited_text(value.get("boundaryNotice"), 160)
+        or "这只是状态理解，不是心理诊断；最终路线由用户确认。",
+    }
 
 
 @app.route("/", methods=["GET"])
@@ -553,6 +706,7 @@ def index():
             "health": "/health",
             "weather": "/weather",
             "places": "/places",
+            "interpret": "POST /interpret",
             "route": "/route?energy=30&minutes=40&social=low",
         },
     })
@@ -627,6 +781,106 @@ def places():
             "places": candidates,
         })
     except AmapError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.code,
+            "message": error.message,
+        }), error.http_status
+
+
+@app.route("/interpret", methods=["POST", "OPTIONS"])
+def interpret():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    try:
+        if request.content_length and request.content_length > 4096:
+            raise BailianError(
+                "INTERPRETATION_INPUT_TOO_LARGE",
+                "状态数据过长",
+                413,
+            )
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise BailianError(
+                "INVALID_INTERPRETATION_INPUT",
+                "请提交 JSON 状态数据",
+                400,
+            )
+
+        try:
+            energy = int(payload.get("energy"))
+            available_minutes = int(payload.get("minutes"))
+        except (TypeError, ValueError) as error:
+            raise BailianError(
+                "INVALID_INTERPRETATION_INPUT",
+                "energy 和 minutes 必须是数字",
+                400,
+            ) from error
+        if not 0 <= energy <= 100 or not 20 <= available_minutes <= 90:
+            raise BailianError(
+                "INVALID_INTERPRETATION_INPUT",
+                "energy 需为 0～100，minutes 需为 20～90",
+                400,
+            )
+
+        social = limited_text(payload.get("social"), 20)
+        action = limited_text(payload.get("action"), 20)
+        allowed_social = {"独处", "轻微接触", "开放交流"}
+        allowed_actions = {"散步", "坐一会", "寻找灵感"}
+        if social not in allowed_social or action not in allowed_actions:
+            raise BailianError(
+                "INVALID_INTERPRETATION_INPUT",
+                "social 或 action 不在允许范围内",
+                400,
+            )
+
+        minimized_state = {
+            "energy": energy,
+            "minutes": available_minutes,
+            "social": social,
+            "action": action,
+        }
+        system_prompt = """你是“余白”城市精神漫游产品中的状态协商模块。
+你的任务不是诊断心理状态，而是把四个最小化字段转化为可由用户确认的路线偏好。
+不要声称知道用户未提供的感受，不要给医疗建议，不要虚构地点、天气或地图事实。
+必须只输出一个 JSON 对象，字段严格如下：
+summary: 一句克制、可修正的状态理解；
+needs: 1到4个短语数组；
+avoid: 1到4个短语数组；
+routePreference: 只能是 balanced、calm、sheltered、inspiration、social 之一；
+confidence: 使用“初步理解，等待确认”或类似措辞；
+boundaryNotice: 明确这不是心理诊断，路线最终由用户确认。
+偏好含义：calm=自然与安静阅读；sheltered=室内或遮蔽；inspiration=文化与观察；social=低压力接触；balanced=均衡。"""
+        interpretation, raw_response, model = bailian_chat([
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": "请根据以下最小化状态数据输出 JSON："
+                + json.dumps(minimized_state, ensure_ascii=False),
+            },
+        ])
+        validated = validate_interpretation(interpretation)
+        usage = raw_response.get("usage", {})
+
+        return jsonify({
+            "ok": True,
+            "source": "阿里云百炼",
+            "model": model,
+            "interpretation": validated,
+            "privacy": {
+                "sentFields": ["energy", "minutes", "social", "action"],
+                "excludedFields": ["description", "name", "history", "location"],
+                "storedByYubai": False,
+            },
+            "humanControl": "AI 仅生成可修正的路线偏好；是否采用及最终路线由用户确认",
+            "usage": {
+                "inputTokens": integer_value(usage.get("prompt_tokens")),
+                "outputTokens": integer_value(usage.get("completion_tokens")),
+                "totalTokens": integer_value(usage.get("total_tokens")),
+            },
+        })
+    except BailianError as error:
         return jsonify({
             "ok": False,
             "error": error.code,
