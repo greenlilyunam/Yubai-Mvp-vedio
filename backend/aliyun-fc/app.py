@@ -175,6 +175,31 @@ def bailian_key():
     return key
 
 
+def bailian_http_error(error):
+    upstream_code = ""
+    try:
+        upstream_data = json.loads(error.read().decode("utf-8"))
+        raw_code = text_value(upstream_data.get("code") or upstream_data.get("error", {}).get("code"))
+        upstream_code = re.sub(r"[^A-Za-z0-9_.-]", "", raw_code)[:60]
+    except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    status = int(getattr(error, "code", 502) or 502)
+    code_suffix = f"，{upstream_code}" if upstream_code else ""
+    messages = {
+        400: f"百炼请求参数错误（400{code_suffix}）：检查模型名称与参数兼容性",
+        401: f"百炼拒绝了 API Key（401{code_suffix}）：检查 Key 是否完整并属于中国内地地域",
+        403: f"百炼权限不足（403{code_suffix}）：确认模型服务已开通且 Key 有访问权限",
+        404: f"百炼找不到模型或接口（404{code_suffix}）：检查 BAILIAN_MODEL 和 BAILIAN_BASE_URL",
+        429: f"百炼额度或调用频率受限（429{code_suffix}）：检查免费额度、余额或稍后重试",
+    }
+    return BailianError(
+        "BAILIAN_HTTP_ERROR",
+        messages.get(status, f"百炼服务返回 HTTP {status}{code_suffix}，请检查函数日志"),
+        502,
+    )
+
+
 def bailian_chat(messages, timeout=18):
     base_url = env_value("BAILIAN_BASE_URL", BAILIAN_DEFAULT_BASE_URL).rstrip("/")
     model = env_value("BAILIAN_MODEL", BAILIAN_DEFAULT_MODEL)
@@ -202,11 +227,7 @@ def bailian_chat(messages, timeout=18):
         with urlopen(model_request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        raise BailianError(
-            "BAILIAN_HTTP_ERROR",
-            "百炼模型服务暂时无法完成请求",
-            502,
-        ) from error
+        raise bailian_http_error(error) from error
     except (URLError, TimeoutError) as error:
         raise BailianError(
             "BAILIAN_NETWORK_ERROR",
