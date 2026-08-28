@@ -802,6 +802,11 @@ def interpret():
             )
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
+            try:
+                payload = json.loads(request.get_data(cache=False, as_text=True))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+        if not isinstance(payload, dict):
             raise BailianError(
                 "INVALID_INTERPRETATION_INPUT",
                 "请提交 JSON 状态数据",

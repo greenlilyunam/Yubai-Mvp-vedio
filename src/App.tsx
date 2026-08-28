@@ -89,7 +89,9 @@ function requestInterpretation(input: InputState, signal: AbortSignal) {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json",
+      // text/plain is CORS-safelisted and avoids an unreliable FC preflight.
+      // The payload remains JSON and the server validates the same four fields.
+      "Content-Type": "text/plain;charset=UTF-8",
     },
     body: JSON.stringify({
       energy: input.energy,
