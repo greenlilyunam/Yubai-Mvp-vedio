@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, ArrowRight, BatteryMedium, Camera, Check, ChevronDown, Clock3,
   Cloud, Compass, Footprints, Leaf, Lightbulb, Map, MessageCircleMore, Minus,
-  Pencil, Plus, Route, ShieldCheck, Sparkles, Trash2, Upload,
+  Mic, Pencil, Plus, Route, ShieldCheck, Sparkles, Trash2, Upload,
   Users, Volume2, Wind, X,
 } from "lucide-react";
 import {
@@ -14,6 +14,7 @@ import type { HubTab } from "./ExtendedScreens";
 type Step = "splash" | "home" | "world" | "resonance" | "map" | "mapAdd" | "mapEntry" | "profile" | "card" | "input" | "thinking" | "negotiate" | "plan" | "journey" | "adjust" | "reflection" | "done";
 type Branch = "noise" | "tired" | "continue";
 type InputState = { energy: number; time: number; social: "独处" | "轻微接触" | "开放交流"; action: "散步" | "坐一会" | "寻找灵感"; description: string };
+type JourneyMoment = { stopId: string; stopName: string; photo: string; audio: string; note: string };
 type WeatherData = {
   ok: true;
   area: { province: string; city: string; adcode: string };
@@ -363,7 +364,118 @@ function PlanScreen({ input, next, back, onRouteLoaded, initialInterpretation, s
   </main></section>;
 }
 
-function JourneyScreen({ feedback, finish, notice, node, advance, route }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void; route: RouteData | null }) {
+function MomentCapture({ stop, moment, save, clear }: { stop: RouteStop; moment?: JourneyMoment; save: (moment: JourneyMoment) => void; clear: () => void }) {
+  const [open, setOpen] = useState(Boolean(moment));
+  const [photo, setPhoto] = useState(moment?.photo || "");
+  const [audio, setAudio] = useState(moment?.audio || "");
+  const [note, setNote] = useState(moment?.note || "");
+  const [recording, setRecording] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  const [audioError, setAudioError] = useState("");
+  const photoRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const intervalRef = useRef<number | null>(null);
+  const timeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setPhoto(moment?.photo || "");
+    setAudio(moment?.audio || "");
+    setNote(moment?.note || "");
+  }, [moment, stop.id]);
+
+  const stopStream = () => {
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
+    intervalRef.current = null;
+    timeoutRef.current = null;
+  };
+
+  useEffect(() => () => {
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    stopStream();
+  }, []);
+
+  const capturePhoto = (file?: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setPhoto(String(reader.result));
+    reader.readAsDataURL(file);
+  };
+
+  const stopRecording = () => {
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    stopStream();
+    setRecording(false);
+  };
+
+  const startRecording = async () => {
+    setAudioError("");
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setAudioError("当前浏览器暂不支持网页录音，可改用文字记录。 ");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const candidates = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"];
+      const mimeType = candidates.find(type => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const chunks: BlobPart[] = [];
+      recorderRef.current = recorder;
+      recorder.ondataavailable = event => event.data.size > 0 && chunks.push(event.data);
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const reader = new FileReader();
+        reader.onload = () => setAudio(String(reader.result));
+        reader.readAsDataURL(blob);
+        stopStream();
+        setRecording(false);
+      };
+      recorder.start();
+      setSeconds(0);
+      setRecording(true);
+      intervalRef.current = window.setInterval(() => setSeconds(value => Math.min(20, value + 1)), 1000);
+      timeoutRef.current = window.setTimeout(stopRecording, 20000);
+    } catch {
+      stopStream();
+      setRecording(false);
+      setAudioError("没有获得麦克风权限；你可以跳过录音或改写一句话。");
+    }
+  };
+
+  const hasDraft = Boolean(photo || audio || note.trim());
+  const hasSaved = Boolean(moment?.photo || moment?.audio || moment?.note);
+  const skip = () => {
+    stopRecording();
+    setPhoto("");
+    setAudio("");
+    setNote("");
+    setAudioError("");
+    clear();
+    setOpen(false);
+  };
+
+  if (!open) return <button className={`moment-entry ${hasSaved ? "has-moment" : ""}`} onClick={() => setOpen(true)}><Camera /><span><b>{hasSaved ? "已记录这一刻" : "记录这一刻"}</b><small>{hasSaved ? "可继续修改或删除" : "照片、20 秒声音或一句话，均可跳过"}</small></span><Pencil /></button>;
+
+  return <section className="moment-capture" aria-label={`记录${displayPlaceName(stop.name)}的这一刻`}>
+    <header><span><Sparkles />记录这一刻</span><button onClick={() => setOpen(false)} aria-label="收起记录"><ChevronDown /></button></header>
+    <p>只保留在当前浏览器会话，未经你的选择不会发送或长期保存。</p>
+    <div className="moment-tools">
+      <button className={photo ? "selected" : ""} onClick={() => photoRef.current?.click()}><Camera /><span>{photo ? "更换照片" : "拍一张照片"}</span><input ref={photoRef} type="file" accept="image/*" capture="environment" onChange={event => capturePhoto(event.target.files?.[0])} hidden /></button>
+      <button className={recording || audio ? "selected" : ""} onClick={recording ? stopRecording : startRecording}><Mic /><span>{recording ? `停止录音 ${seconds}/20s` : audio ? "重新录音" : "录一段声音"}</span></button>
+    </div>
+    {photo && <div className="moment-photo"><img src={photo} alt={`${displayPlaceName(stop.name)}的现场记录`} /><button onClick={() => setPhoto("")} aria-label="删除照片"><Trash2 /></button></div>}
+    {audio && <div className="moment-audio"><audio controls src={audio} preload="metadata" /><button onClick={() => setAudio("")} aria-label="删除录音"><Trash2 /></button></div>}
+    {audioError && <small className="moment-error">{audioError}</small>}
+    <label className="moment-note"><span>写下一句话 <small>{note.length}/80</small></span><textarea maxLength={80} value={note} onChange={event => setNote(event.target.value)} placeholder="例如：风穿过树叶时，这里突然安静了一点。" /></label>
+    <div className="moment-actions"><button className="moment-skip" onClick={skip}>跳过，不留下记录</button><button className="moment-save" disabled={!hasDraft || recording} onClick={() => { save({ stopId: stop.id, stopName: displayPlaceName(stop.name), photo, audio, note: note.trim() }); setOpen(false); }}><Check />保存这一刻</button></div>
+  </section>;
+}
+
+function JourneyScreen({ feedback, finish, notice, node, advance, route, moments, saveMoment, clearMoment }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void; route: RouteData | null; moments: Record<string, JourneyMoment>; saveMoment: (moment: JourneyMoment) => void; clearMoment: (stopId: string) => void }) {
   const hasLiveRoute = Boolean(route?.stops.length);
   const total = hasLiveRoute ? route!.stops.length : 3;
   const currentNode = Math.min(node, total);
@@ -379,7 +491,7 @@ function JourneyScreen({ feedback, finish, notice, node, advance, route }: { fee
       const leg = route.legs[index];
       const Icon = routeIcon(stop.category);
       const walkingMinutes = Math.max(1, Math.round((leg?.durationSeconds || 0) / 60));
-      return <article key={stop.id} className={stateClass(itemNode)}><i>{itemNode < currentNode ? <Check /> : itemNode}</i><div><small>{itemNode < currentNode ? "已完成" : itemNode === currentNode ? "现在前往" : "下一地点"} · 步行 {walkingMinutes} 分钟</small><h3>{displayPlaceName(stop.name)}</h3><p>{stop.suggestedAction}</p><aside className="journey-place-meta"><span><Icon />{stop.category}</span><span><Footprints />{leg?.distanceMeters || 0} 米</span><span><Clock3 />停留 {stop.suggestedStayMinutes} 分钟</span></aside><a className="amap-link" href={amapNavigationUrl(route, index)} target="_blank" rel="noreferrer"><Route />在高德查看本段步行路线</a>{itemNode === currentNode && <span className="journey-place-note"><Sparkles />任务来自这个地点的空间类型，不是随机文案</span>}</div></article>;
+      return <article key={stop.id} className={stateClass(itemNode)}><i>{itemNode < currentNode ? <Check /> : itemNode}</i><div><small>{itemNode < currentNode ? "已完成" : itemNode === currentNode ? "现在前往" : "下一地点"} · 步行 {walkingMinutes} 分钟</small><h3>{displayPlaceName(stop.name)}</h3><p>{stop.suggestedAction}</p><aside className="journey-place-meta"><span><Icon />{stop.category}</span><span><Footprints />{leg?.distanceMeters || 0} 米</span><span><Clock3 />停留 {stop.suggestedStayMinutes} 分钟</span></aside><a className="amap-link" href={amapNavigationUrl(route, index)} target="_blank" rel="noreferrer"><Route />在高德查看本段步行路线</a>{itemNode === currentNode && <><span className="journey-place-note"><Sparkles />任务来自这个地点的空间类型，不是随机文案</span><MomentCapture stop={stop} moment={moments[stop.id]} save={saveMoment} clear={() => clearMoment(stop.id)} /></>}</div></article>;
     })}</section> : <section className="journey-timeline"><article className={stateClass(1)}><i>{currentNode > 1 ? <Check /> : 1}</i><div><small>{currentNode > 1 ? "完成" : "现在"}</small><h3>断开屏幕</h3><p>走出住所，让眼睛重新适应远处。</p></div></article><article className={stateClass(2)}><i>{currentNode > 2 ? <Check /> : 2}</i><div><small>{currentNode > 2 ? "完成" : currentNode === 2 ? "现在" : "下一步"}</small><h3>触碰自然</h3><p>听风的声音，观察地面上的光。</p></div></article><article className={stateClass(3)}><i>3</i><div><small>{currentNode === 3 ? "现在" : "下一步"}</small><h3>留下一处空间</h3><p>拍下一处让你感觉有呼吸感的空间。</p></div></article></section>}<div className="journey-location-boundary"><ShieldCheck />到达与完成由你手动确认，余白不会持续上传实时位置。</div><button className="finish-button" onClick={currentNode < total ? advance : finish}>{currentNode < total ? `完成“${currentStop ? displayPlaceName(currentStop.name) : "当前节点"}”` : "完成本次感知"}</button><button className="feedback-button" onClick={feedback}><Sparkles />此刻感觉怎么样？</button>
   </main></section>;
 }
@@ -398,10 +510,11 @@ function Toggle({ label, detail, value, change }: { label: string; detail: strin
   return <button className="toggle-row" onClick={change}><span><b>{label}</b><small>{detail}</small></span><i className={value ? "on" : ""}><em /></i></button>;
 }
 
-function ReflectionScreen({ done }: { done: (saved: boolean, keyword: string) => void }) {
+function ReflectionScreen({ done, moments, removeMoment }: { done: (saved: boolean, keyword: string) => void; moments: Record<string, JourneyMoment>; removeMoment: (stopId: string) => void }) {
   const [image, setImage] = useState(""); const [caption, setCaption] = useState(""); const [keyword, setKeyword] = useState("松动"); const [inference, setInference] = useState(true); const [summary, setSummary] = useState("今天你选择了一条低刺激的路径，让密集的思绪在脚步与光影之间慢慢松开。"); const [location, setLocation] = useState(false); const [map, setMap] = useState(true); const [memory, setMemory] = useState(false); const ref = useRef<HTMLInputElement>(null);
   const upload = (file?: File) => { if (!file) return; const reader = new FileReader(); reader.onload = () => setImage(String(reader.result)); reader.readAsDataURL(file); };
-  return <section className="screen scroll-screen"><Header title="今日余白" /><main className="page reflection-page"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p><button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>上传一张漫游照片</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail="默认关闭，不记录路线坐标" value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="只保存这次共创的内容" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section><PrimaryButton onClick={() => done(true, keyword || "未命名")}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => done(false, keyword || "未命名")}>不保存，直接结束</button></main></section>;
+  const momentList = Object.values(moments);
+  return <section className="screen scroll-screen"><Header title="今日余白" /><main className="page reflection-page"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p>{momentList.length > 0 && <section className="moment-review"><header><span><Sparkles />沿途留下的瞬间</span><small>{momentList.length} 个地点</small></header>{momentList.map(moment => <article key={moment.stopId}>{moment.photo && <img src={moment.photo} alt={`${moment.stopName}的现场记录`} />}<div><small>{moment.stopName}</small>{moment.note && <p>{moment.note}</p>}{moment.audio && <audio controls src={moment.audio} preload="metadata" />}</div><button onClick={() => removeMoment(moment.stopId)} aria-label={`删除${moment.stopName}的记录`}><Trash2 /></button></article>)}<p><ShieldCheck />这些内容仍只在当前会话中；你可以逐条删除。</p></section>}<button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>{momentList.length ? "再补充一张漫游照片" : "上传一张漫游照片"}</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" capture="environment" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail="默认关闭，不记录路线坐标" value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="只保存这次共创的内容" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section><PrimaryButton onClick={() => done(true, keyword || "未命名")}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => done(false, keyword || "未命名")}>不保存，直接结束</button></main></section>;
 }
 
 function DoneScreen({ restart, viewCard, saved, keyword }: { restart: () => void; viewCard: () => void; saved: boolean; keyword: string }) {
@@ -414,6 +527,7 @@ export default function App() {
   const initialStep: Step = requested === "feedback" ? "journey" : valid.includes(requested as Step) ? requested as Step : "splash";
   const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading"); const [aiInterpretationError, setAiInterpretationError] = useState("");
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
+  const [moments, setMoments] = useState<Record<string, JourneyMoment>>({});
   const shouldInterpret = step === "thinking" || step === "negotiate";
   useEffect(() => {
     if (!shouldInterpret) return;
@@ -451,7 +565,9 @@ export default function App() {
     };
   }, [input, liveRoute, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
-  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); };
+  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); setMoments({}); };
+  const saveMoment = (moment: JourneyMoment) => setMoments(current => ({ ...current, [moment.stopId]: moment }));
+  const clearMoment = (stopId: string) => setMoments(current => { const next = { ...current }; delete next[stopId]; return next; });
   const navigateHub = (tab: HubTab) => setStep(tab);
   const beginJourney = (action: InputState["action"]) => { setInput({ ...input, action }); setStep("input"); };
   const progress = stepProgress[step];
@@ -465,6 +581,6 @@ export default function App() {
     {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} />}
     {step === "profile" && <ProfileScreen navigate={navigateHub} />}
     {step === "card" && <ResultCardScreen saveToMap={() => { setMapSaved(true); setStep("map"); }} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setMoments({}); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} moments={moments} saveMoment={saveMoment} clearMoment={clearMoment} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen moments={moments} removeMoment={clearMoment} done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }
