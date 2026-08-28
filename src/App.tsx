@@ -99,8 +99,10 @@ function requestInterpretation(input: InputState, signal: AbortSignal) {
     }),
     signal,
   }).then(async response => {
-    const data = await response.json();
-    if (!response.ok || data.ok !== true) throw new Error("interpretation unavailable");
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.ok !== true) {
+      throw new Error(data?.message || `百炼接口请求失败（HTTP ${response.status}）`);
+    }
     return data as InterpretationData;
   });
 }
@@ -213,7 +215,7 @@ function ThinkingScreen({ input, next }: { input: InputState; next: () => void }
   return <section className="screen thinking-screen" aria-live="polite"><div className="thinking-orbit"><i /><i /><span><Sparkles /></span><em>能量 · {input.energy}%</em><em>{input.social}边界</em><em>{input.time} 分钟</em></div><main><h2>正在整理此刻的你</h2><p>把能量、时间、社交边界和行动倾向放在一起理解</p><div><span /><span /><span /></div></main></section>;
 }
 
-function NegotiationScreen({ input, selected, setSelected, custom, setCustom, next, back, interpretation, interpretationStatus }: { input: InputState; selected: string; setSelected: (v: string) => void; custom: string; setCustom: (v: string) => void; next: () => void; back: () => void; interpretation: InterpretationData | null; interpretationStatus: "loading" | "live" | "fallback" }) {
+function NegotiationScreen({ input, selected, setSelected, custom, setCustom, next, back, interpretation, interpretationStatus, interpretationError }: { input: InputState; selected: string; setSelected: (v: string) => void; custom: string; setCustom: (v: string) => void; next: () => void; back: () => void; interpretation: InterpretationData | null; interpretationStatus: "loading" | "live" | "fallback"; interpretationError: string }) {
   const negotiation = useMemo(() => {
     if (selected === "我想再安静一些") return { text: "极低刺激、短时间离开室内，以及几乎不需要交流的自然接触。", tags: ["极低刺激", "避开主路", "轻微移动", "无需交流"], avoid: "我会避开主路、商业场所、突然出现的声音和需要完成任务的地点。" };
     if (selected === "我其实想接触一点人") return { text: "低压力的轻微移动，以及能看见他人、但不必主动交流的环境。", tags: ["轻微接触", "可随时退出", "缓慢移动", "保持距离"], avoid: "我会避开必须社交、持续对话和过度拥挤的场所。" };
@@ -224,7 +226,7 @@ function NegotiationScreen({ input, selected, setSelected, custom, setCustom, ne
   }, [input, interpretation, interpretationStatus, selected]);
   const negotiatedText = custom.trim() ? `${negotiation.text} 同时优先考虑：${custom.trim()}` : negotiation.text;
   return <section className="screen scroll-screen"><Header title="状态协商" back={back} /><main className="page negotiate-page"><div className="step-label"><b>01</b>先对齐，再出发</div><h1>我先试着理解你</h1><p className="lead">你可以修正我，这里没有“绝对性的正确”。</p>
-    <section className="ai-quote" aria-live="polite"><div><Sparkles />{interpretationStatus === "live" && interpretation ? `百炼 ${interpretation.model} · 初步理解` : interpretationStatus === "loading" ? "百炼正在理解 · 可先修正" : "本地安全理解 · 百炼暂不可用"}</div><p>我理解你今天需要的是：</p><h2>{negotiatedText}</h2><div className="need-tags">{negotiation.tags.map(tag => <span key={tag}>{tag}</span>)}</div><small><X />{negotiation.avoid}</small></section>
+    <section className="ai-quote" aria-live="polite"><div><Sparkles /><span>{interpretationStatus === "live" && interpretation ? `百炼 ${interpretation.model} · 初步理解` : interpretationStatus === "loading" ? "百炼正在理解 · 可先修正" : "本地安全理解"}{interpretationStatus === "fallback" && <small className="ai-error-reason">{interpretationError || "百炼暂不可用"}</small>}</span></div><p>我理解你今天需要的是：</p><h2>{negotiatedText}</h2><div className="need-tags">{negotiation.tags.map(tag => <span key={tag}>{tag}</span>)}</div><small><X />{negotiation.avoid}</small></section>
     <section className="negotiation-options"><h3>这个理解离你有多近？</h3>{negotiationOptions.map(x => <button key={x} className={selected === x ? "selected" : ""} aria-pressed={selected === x} onClick={() => setSelected(x)}><span>{x}</span>{selected === x ? <Check /> : <ArrowRight />}</button>)}<label className={custom.trim() ? "has-value" : ""}><input value={custom} onChange={e => setCustom(e.target.value)} placeholder="自定义补充……" /><Pencil /></label>{custom.trim() && <small className="live-correction"><Check />已加入本次状态理解</small>}</section>
     <div className="coedit-note"><ShieldCheck />百炼只接收能量、时间、社交和行动；自定义文字不发送。预设修正会在本地改变路线偏好。</div><PrimaryButton onClick={next}>这个理解可以继续</PrimaryButton>
   </main></section>;
@@ -408,7 +410,7 @@ export default function App() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []); const requested = params.get("screen");
   const valid: Step[] = ["splash", "home", "world", "resonance", "map", "mapAdd", "mapEntry", "profile", "card", "input", "thinking", "negotiate", "plan", "journey", "adjust", "reflection", "done"];
   const initialStep: Step = requested === "feedback" ? "journey" : valid.includes(requested as Step) ? requested as Step : "splash";
-  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading");
+  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading"); const [aiInterpretationError, setAiInterpretationError] = useState("");
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
   const shouldInterpret = step === "thinking" || step === "negotiate";
   useEffect(() => {
@@ -416,14 +418,16 @@ export default function App() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 22000);
     setAiInterpretationStatus("loading");
+    setAiInterpretationError("");
     requestInterpretation(input, controller.signal)
       .then(data => {
         setAiInterpretation(data);
         setAiInterpretationStatus("live");
       })
-      .catch(() => {
+      .catch(error => {
         setAiInterpretation(null);
         setAiInterpretationStatus("fallback");
+        setAiInterpretationError(error instanceof Error ? error.message : "百炼暂不可用");
       })
       .finally(() => window.clearTimeout(timeout));
     return () => {
@@ -445,7 +449,7 @@ export default function App() {
     };
   }, [input, liveRoute, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
-  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setSelected("理解得很准确"); setCustom(""); };
+  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); };
   const navigateHub = (tab: HubTab) => setStep(tab);
   const beginJourney = (action: InputState["action"]) => { setInput({ ...input, action }); setStep("input"); };
   const progress = stepProgress[step];
@@ -459,6 +463,6 @@ export default function App() {
     {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} />}
     {step === "profile" && <ProfileScreen navigate={navigateHub} />}
     {step === "card" && <ResultCardScreen saveToMap={() => { setMapSaved(true); setStep("map"); }} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }

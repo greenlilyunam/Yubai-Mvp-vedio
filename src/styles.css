@@ -313,3 +313,4 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px soli
 .done-screen>.done-actions{position:absolute;left:22px;right:22px;bottom:52px}.done-screen>.done-actions .primary-button{position:static;width:100%}.done-screen>.done-actions .text-button{padding:10px}.done-screen>.primary-button{display:none}
 
 @keyframes world-scan{from{top:0}to{top:100%}}
+.ai-quote>div:first-child>span{display:grid;gap:2px}.ai-quote .ai-error-reason{display:block;color:#9a6257;font-size:8px;font-weight:400;line-height:1.35}
