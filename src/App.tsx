@@ -9,12 +9,21 @@ import {
   HomeScreen, MapAddScreen, MapEntryScreen, MapScreen, ProfileScreen,
   ResonanceScreen, ResultCardScreen, SplashScreen, WorldReadingScreen,
 } from "./ExtendedScreens";
-import type { HubTab } from "./ExtendedScreens";
+import type { HubTab, JourneyMemory, MapMemory } from "./ExtendedScreens";
 
 type Step = "splash" | "home" | "world" | "resonance" | "map" | "mapAdd" | "mapEntry" | "profile" | "card" | "input" | "thinking" | "negotiate" | "plan" | "journey" | "adjust" | "reflection" | "done";
 type Branch = "noise" | "tired" | "continue";
 type InputState = { energy: number; time: number; social: "独处" | "轻微接触" | "开放交流"; action: "散步" | "坐一会" | "寻找灵感"; description: string };
 type JourneyMoment = { stopId: string; stopName: string; photo: string; audio: string; note: string };
+type ReflectionResult = {
+  saved: boolean;
+  keyword: string;
+  summary: string;
+  caption: string;
+  photo: string;
+  addToMap: boolean;
+  saveLocation: boolean;
+};
 type WeatherData = {
   ok: true;
   area: { province: string; city: string; adcode: string };
@@ -501,20 +510,27 @@ function FeedbackSheet({ close, choose, finish }: { close: () => void; choose: (
   return <div className="sheet-mask" onClick={close}><section className="feedback-sheet" role="dialog" aria-modal="true" aria-labelledby="feedback-title" onClick={e => e.stopPropagation()}><i className="handle" /><button className="sheet-close" onClick={close} aria-label="关闭反馈"><X /></button><h2 id="feedback-title">此刻感觉怎么样？</h2><p>你的反馈会立刻改变接下来的路线。</p><div>{([[Volume2, "这里太吵", "调整路线与任务", "noise", true], [BatteryMedium, "有点累了", "缩短剩余路程", "tired", true], [Minus, "没什么感觉", "即将开放", "static", false], [Compass, "想继续探索", "增加可选节点", "continue", true], [Users, "想接触一点人", "即将开放", "static", false], [X, "提前结束", "进入结束共创", "finish", true]] as const).map(([Icon, title, sub, action, enabled]) => <button key={title} disabled={!enabled} className={!enabled ? "option-disabled" : ""} onClick={() => action === "finish" ? finish() : choose(action as Branch)}><Icon /><b>{title}</b><span>{sub}</span></button>)}</div></section></div>;
 }
 
-function AdjustmentScreen({ branch, accept, modify }: { branch: Branch; accept: () => void; modify: () => void }) {
+function AdjustmentScreen({ branch, accept, modify, currentRoute, nextRoute, status }: { branch: Branch; accept: () => void; modify: () => void; currentRoute: RouteData | null; nextRoute: RouteData | null; status: "loading" | "live" | "fallback" }) {
   const data = adjustments[branch];
-  return <section className="screen scroll-screen adjustment-screen"><Header title="动态调整" back={modify} /><main className="page adjustment-page"><div className="adjust-route"><i><Route /></i><span /><i><Leaf /></i></div><div className="eyebrow"><Sparkles />已根据你的反馈重新计算</div><h1>{data.title}</h1><p>{data.body}</p><section className="comparison"><header><span>调整内容</span><span>原方案</span><span>新方案</span></header>{data.rows.map(r => <div key={r[0]}><b>{r[0]}</b><span>{r[1]}</span><strong>{r[2]}</strong></div>)}</section><aside><Sparkles /><div><b>AI 调整依据</b><p>你的即时感受优先于原计划。新路线更符合此刻的能量、社交边界与可用时间。</p></div></aside><PrimaryButton onClick={accept}>继续漫游</PrimaryButton><button className="text-button" onClick={modify}>继续修改</button></main></section>;
+  const rows = currentRoute && nextRoute ? [
+    ["地点", `${currentRoute.stops.length} 个节点`, `${nextRoute.stops.length} 个节点`],
+    ["步行", `${currentRoute.summary.walkingDurationMinutes} 分钟`, `${nextRoute.summary.walkingDurationMinutes} 分钟`],
+    ["总时长", `${currentRoute.summary.estimatedTotalMinutes} 分钟`, `${nextRoute.summary.estimatedTotalMinutes} 分钟`],
+    ["下一站", displayPlaceName(currentRoute.stops[0]?.name || "原路线"), displayPlaceName(nextRoute.stops[0]?.name || "新路线")],
+  ] : data.rows;
+  return <section className="screen scroll-screen adjustment-screen"><Header title="动态调整" back={modify} /><main className="page adjustment-page"><div className="adjust-route"><i><Route /></i><span /><i><Leaf /></i></div><div className="eyebrow"><Sparkles />{status === "loading" ? "正在根据反馈重算真实路线" : status === "live" ? "已根据你的反馈重新计算" : "真实路线暂未更新"}</div><h1>{data.title}</h1><p>{status === "live" && nextRoute ? `高德已返回新的步行方案：${nextRoute.stops.map(stop => displayPlaceName(stop.name)).join(" → ")}。` : status === "loading" ? "正在重新查询地点和步行时间，请稍候。" : data.body}</p><section className="comparison"><header><span>调整内容</span><span>原方案</span><span>新方案</span></header>{rows.map(r => <div key={r[0]}><b>{r[0]}</b><span>{r[1]}</span><strong>{r[2]}</strong></div>)}</section><aside><Sparkles /><div><b>AI 调整依据</b><p>你的即时感受优先于原计划。新路线重新调用真实地点与步行规划，而不是只替换文案。</p></div></aside><button className="primary-button" disabled={status === "loading"} onClick={accept}><span>{status === "loading" ? "正在计算…" : status === "live" ? "采用新路线" : "沿原路线继续"}</span><ArrowRight /></button><button className="text-button" onClick={modify}>继续修改</button></main></section>;
 }
 
 function Toggle({ label, detail, value, change }: { label: string; detail: string; value: boolean; change: () => void }) {
   return <button className="toggle-row" onClick={change}><span><b>{label}</b><small>{detail}</small></span><i className={value ? "on" : ""}><em /></i></button>;
 }
 
-function ReflectionScreen({ done, moments, removeMoment }: { done: (saved: boolean, keyword: string) => void; moments: Record<string, JourneyMoment>; removeMoment: (stopId: string) => void }) {
+function ReflectionScreen({ done, moments, removeMoment }: { done: (result: ReflectionResult) => void; moments: Record<string, JourneyMoment>; removeMoment: (stopId: string) => void }) {
   const [image, setImage] = useState(""); const [caption, setCaption] = useState(""); const [keyword, setKeyword] = useState("松动"); const [inference, setInference] = useState(true); const [summary, setSummary] = useState("今天你选择了一条低刺激的路径，让密集的思绪在脚步与光影之间慢慢松开。"); const [location, setLocation] = useState(false); const [map, setMap] = useState(true); const [memory, setMemory] = useState(false); const ref = useRef<HTMLInputElement>(null);
   const upload = (file?: File) => { if (!file) return; const reader = new FileReader(); reader.onload = () => setImage(String(reader.result)); reader.readAsDataURL(file); };
   const momentList = Object.values(moments);
-  return <section className="screen scroll-screen"><Header title="今日余白" /><main className="page reflection-page"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p>{momentList.length > 0 && <section className="moment-review"><header><span><Sparkles />沿途留下的瞬间</span><small>{momentList.length} 个地点</small></header>{momentList.map(moment => <article key={moment.stopId}>{moment.photo && <img src={moment.photo} alt={`${moment.stopName}的现场记录`} />}<div><small>{moment.stopName}</small>{moment.note && <p>{moment.note}</p>}{moment.audio && <audio controls src={moment.audio} preload="metadata" />}</div><button onClick={() => removeMoment(moment.stopId)} aria-label={`删除${moment.stopName}的记录`}><Trash2 /></button></article>)}<p><ShieldCheck />这些内容仍只在当前会话中；你可以逐条删除。</p></section>}<button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>{momentList.length ? "再补充一张漫游照片" : "上传一张漫游照片"}</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" capture="environment" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail="默认关闭，不记录路线坐标" value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="只保存这次共创的内容" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section><PrimaryButton onClick={() => done(true, keyword || "未命名")}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => done(false, keyword || "未命名")}>不保存，直接结束</button></main></section>;
+  const finish = (saved: boolean) => done({ saved, keyword: keyword.trim() || "未命名", summary: summary.trim(), caption: caption.trim(), photo: image, addToMap: saved && map, saveLocation: saved && location });
+  return <section className="screen scroll-screen"><Header title="今日余白" /><main className="page reflection-page"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p>{momentList.length > 0 && <section className="moment-review"><header><span><Sparkles />沿途留下的瞬间</span><small>{momentList.length} 个地点</small></header>{momentList.map(moment => <article key={moment.stopId}>{moment.photo && <img src={moment.photo} alt={`${moment.stopName}的现场记录`} />}<div><small>{moment.stopName}</small>{moment.note && <p>{moment.note}</p>}{moment.audio && <audio controls src={moment.audio} preload="metadata" />}</div><button onClick={() => removeMoment(moment.stopId)} aria-label={`删除${moment.stopName}的记录`}><Trash2 /></button></article>)}<p><ShieldCheck />这些内容仍只在当前会话中；你可以逐条删除。</p></section>}<button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>{momentList.length ? "再补充一张漫游照片" : "上传一张漫游照片"}</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" capture="environment" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail="默认关闭，不记录路线坐标" value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="关闭后仍可从余白卡手动加入" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section><PrimaryButton onClick={() => finish(true)}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => finish(false)}>不保存，直接结束</button></main></section>;
 }
 
 function DoneScreen({ restart, viewCard, saved, keyword }: { restart: () => void; viewCard: () => void; saved: boolean; keyword: string }) {
@@ -525,9 +541,15 @@ export default function App() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []); const requested = params.get("screen");
   const valid: Step[] = ["splash", "home", "world", "resonance", "map", "mapAdd", "mapEntry", "profile", "card", "input", "thinking", "negotiate", "plan", "journey", "adjust", "reflection", "done"];
   const initialStep: Step = requested === "feedback" ? "journey" : valid.includes(requested as Step) ? requested as Step : "splash";
-  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [mapSaved, setMapSaved] = useState(false); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading"); const [aiInterpretationError, setAiInterpretationError] = useState("");
+  const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading"); const [aiInterpretationError, setAiInterpretationError] = useState("");
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
   const [moments, setMoments] = useState<Record<string, JourneyMoment>>({});
+  const [memories, setMemories] = useState<JourneyMemory[]>([]);
+  const [currentMemory, setCurrentMemory] = useState<JourneyMemory | null>(null);
+  const [manualPlaces, setManualPlaces] = useState<MapMemory[]>([]);
+  const [selectedMapId, setSelectedMapId] = useState("");
+  const [pendingRoute, setPendingRoute] = useState<RouteData | null>(null);
+  const [adjustmentStatus, setAdjustmentStatus] = useState<"loading" | "live" | "fallback">("fallback");
   const shouldInterpret = step === "thinking" || step === "negotiate";
   useEffect(() => {
     if (!shouldInterpret) return;
@@ -564,23 +586,138 @@ export default function App() {
       controller.abort();
     };
   }, [input, liveRoute, step]);
+  useEffect(() => {
+    if (step !== "adjust") return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 22000);
+    const adjustedInput: InputState = branch === "tired"
+      ? { ...input, energy: Math.max(10, input.energy - 20), time: Math.max(20, input.time - 15) }
+      : branch === "continue"
+        ? { ...input, time: Math.min(90, input.time + 15) }
+        : input;
+    const preference: RoutePreference = branch === "noise" ? "calm" : branch === "tired" ? "sheltered" : "inspiration";
+    setPendingRoute(null);
+    setAdjustmentStatus("loading");
+    requestRoute(adjustedInput, controller.signal, preference)
+      .then(route => { setPendingRoute(route); setAdjustmentStatus("live"); })
+      .catch(() => { setPendingRoute(null); setAdjustmentStatus("fallback"); })
+      .finally(() => window.clearTimeout(timeout));
+    return () => { window.clearTimeout(timeout); controller.abort(); };
+  }, [branch, input, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
   const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); setMoments({}); };
   const saveMoment = (moment: JourneyMoment) => setMoments(current => ({ ...current, [moment.stopId]: moment }));
   const clearMoment = (stopId: string) => setMoments(current => { const next = { ...current }; delete next[stopId]; return next; });
+  const mapEntries = useMemo(() => [
+    ...memories.filter(memory => memory.savedToMap).flatMap(memory => memory.places),
+    ...manualPlaces,
+  ], [manualPlaces, memories]);
+  const selectedMapEntry = mapEntries.find(entry => entry.id === selectedMapId) || mapEntries[0] || null;
+  const saveCurrentMemoryToMap = () => {
+    if (!currentMemory || currentMemory.savedToMap) {
+      setStep("map");
+      return;
+    }
+    const updated = { ...currentMemory, savedToMap: true };
+    setCurrentMemory(updated);
+    setMemories(items => items.some(item => item.id === updated.id) ? items.map(item => item.id === updated.id ? updated : item) : [updated, ...items]);
+    setStep("map");
+  };
+  const completeReflection = (reflection: ReflectionResult) => {
+    const id = `journey-${Date.now()}`;
+    const momentList = Object.values(moments);
+    const capturedPlaces: MapMemory[] = liveRoute?.stops.map(stop => {
+      const moment = moments[stop.id];
+      return {
+        id: `${id}-${stop.id}`,
+        name: displayPlaceName(stop.name),
+        category: stop.category,
+        address: reflection.saveLocation ? stop.address : "深圳 · 南山区（未保存具体位置）",
+        note: moment?.note || stop.suggestedAction,
+        photo: moment?.photo || "",
+        audio: moment?.audio || "",
+        keyword: reflection.keyword,
+        createdAt: new Date().toISOString(),
+        source: `${liveRoute.source} · 本次漫游路线`,
+        fieldVerified: stop.fieldVerified,
+      };
+    }) || momentList.map((moment, index) => ({
+      id: `${id}-${moment.stopId || index}`,
+      name: moment.stopName,
+      category: "本次感知",
+      address: "未保存具体位置",
+      note: moment.note || reflection.summary,
+      photo: moment.photo,
+      audio: moment.audio,
+      keyword: reflection.keyword,
+      createdAt: new Date().toISOString(),
+      source: "本次浏览器会话记录",
+      fieldVerified: false,
+    }));
+    const routePlaces: MapMemory[] = capturedPlaces.length ? capturedPlaces : [{
+      id: `${id}-summary`,
+      name: "本次漫游",
+      category: "未保存地点",
+      address: "未保存具体位置",
+      note: reflection.caption || reflection.summary || "这次漫游没有留下地点信息。",
+      photo: reflection.photo,
+      audio: "",
+      keyword: reflection.keyword,
+      createdAt: new Date().toISOString(),
+      source: "本次浏览器会话记录",
+      fieldVerified: false,
+    }];
+    const memory: JourneyMemory = {
+      id,
+      createdAt: new Date().toISOString(),
+      keyword: reflection.keyword,
+      summary: reflection.summary || momentList.find(moment => moment.note)?.note || "这次漫游留下了一点可以呼吸的距离。",
+      caption: reflection.caption,
+      photo: reflection.photo || momentList.find(moment => moment.photo)?.photo || "",
+      beforeEnergy: input.energy,
+      routeSource: liveRoute?.source || "本次浏览器会话",
+      distanceMeters: liveRoute?.summary.walkingDistanceMeters || 0,
+      durationMinutes: liveRoute?.summary.estimatedTotalMinutes || input.time,
+      savedToMap: reflection.addToMap,
+      saveLocation: reflection.saveLocation,
+      places: routePlaces,
+    };
+    setCurrentMemory(memory);
+    if (reflection.saved) setMemories(items => [memory, ...items.filter(item => item.id !== memory.id)]);
+    setResult({ saved: reflection.saved, keyword: reflection.keyword });
+    setStep("done");
+  };
+  const addManualPlace = (name: string, category: string) => {
+    const entry: MapMemory = {
+      id: `manual-${Date.now()}`,
+      name,
+      category,
+      address: "用户手动添加 · 未保存具体位置",
+      note: "这是你主动留在余白地图中的地点，可以在后续真实到访后补充感知。",
+      photo: "",
+      audio: "",
+      keyword: "待感知",
+      createdAt: new Date().toISOString(),
+      source: "用户手动添加",
+      fieldVerified: false,
+    };
+    setManualPlaces(items => [entry, ...items]);
+    setSelectedMapId(entry.id);
+    setStep("map");
+  };
   const navigateHub = (tab: HubTab) => setStep(tab);
   const beginJourney = (action: InputState["action"]) => { setInput({ ...input, action }); setStep("input"); };
   const progress = stepProgress[step];
   return <div className="app-stage"><div className="desktop-caption"><Leaf /><span>余白 · 完整交互演示</span></div><div className="device-frame" aria-label="手机交互演示框架"><span className="device-speaker" aria-hidden="true"><i /></span><i className="device-button device-button-silent" aria-hidden="true" /><i className="device-button device-button-volume-up" aria-hidden="true" /><i className="device-button device-button-volume-down" aria-hidden="true" /><i className="device-button device-button-power" aria-hidden="true" /><div className="phone-shell"><div className={`progress-line ${progress.value === 0 ? "is-hidden" : ""}`} role="progressbar" aria-label={`当前进度：${progress.label}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.value}><i style={{ width: `${progress.value}%` }} /></div>
     {step === "splash" && <SplashScreen start={() => setStep("home")} />}
-    {step === "home" && <HomeScreen start={beginJourney} readWorld={() => setStep("world")} navigate={navigateHub} />}
+    {step === "home" && <HomeScreen start={beginJourney} readWorld={() => setStep("world")} navigate={navigateHub} latestMemory={memories[0] || null} />}
     {step === "world" && <WorldReadingScreen next={() => setStep("resonance")} />}
     {step === "resonance" && <ResonanceScreen navigate={navigateHub} />}
-    {step === "map" && <MapScreen navigate={navigateHub} add={() => setStep("mapAdd")} openEntry={() => setStep("mapEntry")} saved={mapSaved} />}
-    {step === "mapAdd" && <MapAddScreen back={() => setStep("map")} save={() => { setMapSaved(true); setStep("map"); }} />}
-    {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} />}
-    {step === "profile" && <ProfileScreen navigate={navigateHub} />}
-    {step === "card" && <ResultCardScreen saveToMap={() => { setMapSaved(true); setStep("map"); }} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setMoments({}); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} moments={moments} saveMoment={saveMoment} clearMoment={clearMoment} />}{step === "adjust" && <AdjustmentScreen branch={branch} accept={() => { setNotice(adjustments[branch].notice); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen moments={moments} removeMoment={clearMoment} done={(saved, keyword) => { setResult({ saved, keyword }); setStep("done"); }} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "map" && <MapScreen navigate={navigateHub} add={() => setStep("mapAdd")} openEntry={id => { setSelectedMapId(id); setStep("mapEntry"); }} entries={mapEntries} />}
+    {step === "mapAdd" && <MapAddScreen back={() => setStep("map")} save={addManualPlace} />}
+    {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} entry={selectedMapEntry} />}
+    {step === "profile" && <ProfileScreen navigate={navigateHub} memories={memories} entries={mapEntries} openEntry={id => { setSelectedMapId(id); setStep("mapEntry"); }} />}
+    {step === "card" && <ResultCardScreen memory={currentMemory} saveToMap={saveCurrentMemoryToMap} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setMoments({}); setCurrentMemory(null); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} moments={moments} saveMoment={saveMoment} clearMoment={clearMoment} />}{step === "adjust" && <AdjustmentScreen branch={branch} currentRoute={liveRoute} nextRoute={pendingRoute} status={adjustmentStatus} accept={() => { if (pendingRoute) { setLiveRoute(pendingRoute); setJourneyNode(1); } setNotice(pendingRoute ? `已采用新的真实路线：${pendingRoute.stops.map(stop => displayPlaceName(stop.name)).join(" → ")}` : "真实路线暂未更新，已沿原路线继续"); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen moments={moments} removeMoment={clearMoment} done={completeReflection} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }
