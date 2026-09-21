@@ -388,3 +388,29 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px soli
 @keyframes node-pulse{0%,100%{opacity:.45;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
 
 @media (prefers-reduced-motion:reduce){.mental-liquid,.mental-liquid:before,.mental-liquid:after,.mental-liquid>i,.mental-orb>i,.companion-orbit>i,.companion-orbit>span,.signal-landscape>i,.thinking-ambient i,.thinking-orbit,.thinking-orbit>i,.thinking-sweep,.orbit-node{animation:none!important}}
+
+/* Shared brand actions remain interactive across every hub surface. */
+.hub-screen>.home-header-detail{z-index:95}
+
+/* The map sheet has two intentional states: a quiet preview and a draggable list. */
+.map-explorer{bottom:294px}
+.map-explore-sheet{height:220px;min-height:0;padding:43px 21px 15px;transition:top .36s cubic-bezier(.22,.8,.25,1),height .36s cubic-bezier(.22,.8,.25,1),border-radius .36s ease;overflow:hidden}
+.map-explore-sheet.expanded{top:70px;bottom:74px;height:auto;border-radius:24px 24px 0 0;display:flex;flex-direction:column}
+.map-sheet-handle{position:absolute;left:0;right:0;top:0;height:39px;border:0;background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#7b8983;touch-action:none;cursor:ns-resize}
+.map-sheet-handle i{display:block;width:58px;height:4px;border-radius:4px;background:#cbd4cf;transition:width .25s ease,background .25s ease}.map-sheet-handle span{font-size:7px;letter-spacing:.04em;opacity:0;transform:translateY(-2px);transition:opacity .2s ease,transform .2s ease}.map-sheet-handle:hover span,.map-sheet-handle:focus-visible span,.map-explore-sheet.expanded .map-sheet-handle span{opacity:1;transform:translateY(0)}.map-explore-sheet.expanded .map-sheet-handle i{width:42px;background:#9eb1a7}
+.map-explore-sheet>header{margin-bottom:9px}.map-explore-sheet header h1{font-size:16px}.map-explore-sheet>header>svg{width:17px}
+.map-active-place{min-height:67px;padding:8px 11px}.map-active-place em{display:none}
+.map-sheet-actions{display:flex;align-items:center;gap:10px;margin-top:9px}.map-sheet-actions button{width:158px;flex:none}.map-sheet-actions>small{display:flex;align-items:center;gap:4px;color:#7b8983;font-size:7px;line-height:1.35}.map-sheet-actions>small svg{width:11px;flex:none;color:#2f5d50}
+.map-expanded-list{flex:1;min-height:0;overflow-y:auto;display:grid;align-content:start;gap:8px;padding:3px 1px 8px;scrollbar-width:none}.map-expanded-list::-webkit-scrollbar{display:none}.map-expanded-list>button{width:100%;min-height:61px;border:1px solid rgba(192,200,196,.34);border-radius:13px;background:#f2f5f2;display:grid;grid-template-columns:36px 1fr 17px;gap:9px;align-items:center;padding:9px 11px;text-align:left}.map-expanded-list>button>i{width:34px;height:34px;border-radius:50%;background:#dcebe2;color:#154539;display:grid;place-items:center}.map-expanded-list>button>i svg{width:15px}.map-expanded-list>button>span{display:grid;gap:3px;min-width:0}.map-expanded-list b{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.map-expanded-list small{font-size:8px;color:#718078}.map-expanded-list>button>svg{width:14px;color:#87938d}.map-explore-sheet.expanded .map-sheet-actions{padding-top:2px;border-top:1px solid #e4e9e6}
+
+/* The portrait becomes a slow, breathing focal point rather than a small badge. */
+.profile-screen .hub-scroll{padding-top:26px;background:radial-gradient(circle at 50% 15%,rgba(208,229,215,.62),transparent 29%),#f9faf7}
+.profile-orb{position:relative;width:132px;height:132px;margin:4px auto 20px;background:radial-gradient(circle at 37% 31%,rgba(255,255,255,.92),transparent 26%),linear-gradient(145deg,#cfe6d8,#eef4f0);box-shadow:0 0 0 18px rgba(208,229,215,.2);animation:profile-breathe 4.8s ease-in-out infinite;isolation:isolate}
+.profile-orb:after{content:"";position:absolute;inset:-15px;border:1px solid rgba(47,93,80,.12);border-radius:50%;animation:orbit-turn 13s linear infinite}
+.profile-orb>i{position:absolute;border-radius:50%;border:1px solid rgba(47,93,80,.16)}.profile-orb>i:first-child{inset:14px;border-style:dashed;animation:orbit-turn 11s linear infinite}.profile-orb>i:nth-child(2){inset:31px;animation:orbit-turn 8s linear infinite reverse}.profile-orb svg{position:relative;z-index:2;width:50px;height:50px;stroke-width:1.25}.profile-screen main>header h1{font-size:29px}
+
+/* Route content scrolls independently while its primary decision stays reachable. */
+.plan-screen{display:flex;flex-direction:column;overflow:hidden}.plan-screen>.topbar{position:relative;top:auto;flex:none}.plan-screen>.plan-page{flex:1;min-height:0;overflow-y:auto;padding-bottom:32px;scrollbar-width:none;overscroll-behavior:contain}.plan-screen>.plan-page::-webkit-scrollbar{display:none}.plan-fixed-action{flex:none;padding:10px 20px 18px;background:linear-gradient(to top,#fbfcf9 72%,rgba(251,252,249,.88));border-top:1px solid rgba(219,226,221,.78);box-shadow:0 -12px 26px rgba(21,69,57,.07);z-index:24}.plan-fixed-action .primary-button{margin:0;height:54px}
+
+@keyframes profile-breathe{0%,100%{transform:translateY(0) scale(.98);box-shadow:0 0 0 16px rgba(208,229,215,.18)}50%{transform:translateY(-5px) scale(1.02);box-shadow:0 0 0 25px rgba(208,229,215,.08)}}
+@media (prefers-reduced-motion:reduce){.profile-orb,.profile-orb:after,.profile-orb>i{animation:none!important}}

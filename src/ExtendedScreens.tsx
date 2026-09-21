@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AudioLines, Binoculars, Bookmark, BookOpen, Camera, Check, ChevronLeft,
   ChevronRight, CircleUserRound, Compass, Eye, Flower2, Heart, Leaf, Lightbulb,
@@ -45,17 +45,22 @@ export type MapMemory = {
   location?: { longitude: number; latitude: number };
 };
 
-function BrandHeader({ close, onLeft, onRight }: { close?: () => void; onLeft?: () => void; onRight?: () => void }) {
-  return <header className="brand-header">
-    {onLeft ? <button className="brand-icon-button" onClick={onLeft} aria-label="打开城市信号"><Waves /></button> : <Waves />}
-    <b>YU BAI</b>
-    {close ? <button className="brand-close-button" onClick={close} aria-label="关闭"><X /></button> : onRight ? <button className="brand-icon-button" onClick={onRight} aria-label="打开余白 AI 陪伴状态"><Radio /></button> : <Radio />}
-  </header>;
+function BrandHeader({ close, readWorld }: { close?: () => void; readWorld?: () => void }) {
+  const [panel, setPanel] = useState<HomeHeaderPanel | null>(null);
+  const interactive = !close;
+  return <>
+    <header className="brand-header">
+      {interactive ? <button className="brand-icon-button" onClick={() => setPanel("signals")} aria-label="打开城市信号"><Waves /></button> : <Waves />}
+      <b>YU BAI</b>
+      {close ? <button className="brand-close-button" onClick={close} aria-label="关闭"><X /></button> : <button className="brand-icon-button" onClick={() => setPanel("companion")} aria-label="打开余白 AI 陪伴状态"><Radio /></button>}
+    </header>
+    {panel && <HomeHeaderDetail panel={panel} close={() => setPanel(null)} readWorld={readWorld} />}
+  </>;
 }
 
 type HomeHeaderPanel = "signals" | "companion";
 
-function HomeHeaderDetail({ panel, close, readWorld }: { panel: HomeHeaderPanel; close: () => void; readWorld: () => void }) {
+function HomeHeaderDetail({ panel, close, readWorld }: { panel: HomeHeaderPanel; close: () => void; readWorld?: () => void }) {
   const isSignals = panel === "signals";
   return <section className={`home-header-detail ${isSignals ? "signals-detail" : "companion-detail"}`}>
     <header><button onClick={close} aria-label="返回首页"><ChevronLeft /></button><b>{isSignals ? "城市信号" : "余白 AI"}</b><span /></header>
@@ -70,7 +75,7 @@ function HomeHeaderDetail({ panel, close, readWorld }: { panel: HomeHeaderPanel;
           <article><Eye /><span><b>光线与开放感</b><small>转译为可感知的漫游提示</small></span><em>轻量</em></article>
           <article><AudioLines /><span><b>城市声音</b><small>由你主动感受，不开启后台监听</small></span><em>本地</em></article>
         </section>
-        <button className="detail-primary" onClick={readWorld}>读取此刻的城市 <ChevronRight /></button>
+        <button className="detail-primary" onClick={() => { if (readWorld) readWorld(); else close(); }}>{readWorld ? "读取此刻的城市" : "回到当前页面"} <ChevronRight /></button>
       </> : <>
         <div className="companion-orbit" aria-hidden="true"><i /><i /><span><Sparkles /></span><em>陪伴中</em></div>
         <section className="companion-boundaries">
@@ -109,7 +114,6 @@ export function SplashScreen({ start }: { start: () => void }) {
 type HomeAction = "散步" | "坐一会" | "寻找灵感";
 
 export function HomeScreen({ start, readWorld, navigate, latestMemory }: { start: (action: HomeAction) => void; readWorld: () => void; navigate: (tab: HubTab) => void; latestMemory: JourneyMemory | null }) {
-  const [headerPanel, setHeaderPanel] = useState<HomeHeaderPanel | null>(null);
   const actions = [
     [Wind, "去听风", () => start("散步")],
     [Binoculars, "找回好奇", () => start("寻找灵感")],
@@ -117,7 +121,7 @@ export function HomeScreen({ start, readWorld, navigate, latestMemory }: { start
     [AudioLines, "感受城市脉搏", readWorld],
     [Lightbulb, "捕捉灵感", () => start("寻找灵感")],
   ] as const;
-  return <section className="screen hub-screen home-screen"><BrandHeader onLeft={() => setHeaderPanel("signals")} onRight={() => setHeaderPanel("companion")} />
+  return <section className="screen hub-screen home-screen"><BrandHeader readWorld={readWorld} />
     <main className="hub-scroll">
       <div className="ai-presence"><i />余白 AI · 陪伴中</div>
       <h1>今天，想从生活里找回一点什么？</h1>
@@ -126,7 +130,6 @@ export function HomeScreen({ start, readWorld, navigate, latestMemory }: { start
       <section className="history-section"><h2>上一次漫游记录</h2><button onClick={() => navigate("map")}>{latestMemory ? latestMemory.photo || latestMemory.places.find(place => place.photo)?.photo ? <img src={latestMemory.photo || latestMemory.places.find(place => place.photo)?.photo} alt={`${latestMemory.keyword}的漫游记录`} /> : <div className="history-placeholder"><MapPin /><span>{latestMemory.places.map(place => place.name).join(" → ") || "本次漫游"}</span></div> : <img src={homeHistory} alt="夜晚便利店的漫游记录示例" />}<span><b>{latestMemory ? latestMemory.caption || latestMemory.summary : "树影、风声、便利店的暖光"}</b><small>{latestMemory ? `${latestMemory.places.length} 个地点 · ${latestMemory.durationMinutes} 分钟` : "体验示例"}</small></span></button></section>
     </main>
     <BottomNav current="home" navigate={navigate} />
-    {headerPanel && <HomeHeaderDetail panel={headerPanel} close={() => setHeaderPanel(null)} readWorld={readWorld} />}
   </section>;
 }
 
@@ -184,6 +187,8 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState(entries[0]?.id || "");
   const [zoom, setZoom] = useState(1);
+  const [sheetExpanded, setSheetExpanded] = useState(false);
+  const dragStart = useRef<number | null>(null);
   const filteredEntries = entries.filter(entry => {
     const matchesFilter = filter === "全部" || entry.category.includes(filter);
     const haystack = `${entry.name}${entry.category}${entry.address}${entry.keyword}`.toLowerCase();
@@ -199,15 +204,18 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
     <main className="map-explorer">
       <label className="map-search"><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索地点或感知关键词" aria-label="搜索余白地点" /><SlidersHorizontal /></label>
       <div className="map-filters" aria-label="地点筛选">{filters.map(item => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div>
-      <small className="map-explore-boundary"><ShieldCheck />个人记忆探索视图 · 精确导航请进入地点详情</small>
       <div className="map-controls"><button onClick={() => setZoom(value => Math.min(3, value + 1))} aria-label="放大地图">＋</button><button onClick={() => setZoom(value => Math.max(0, value - 1))} aria-label="缩小地图">−</button><button onClick={() => { setFilter("全部"); setQuery(""); setZoom(1); }} aria-label="回到全部地点"><LocateFixed /></button></div>
       <div className="map-pins" aria-label="地图地点">{filteredEntries.slice(0, 6).map((entry, index) => { const Icon = icons[index % icons.length]; const [left, top] = pinPositions[index]; return <button key={entry.id} className={activeEntry?.id === entry.id ? "active" : ""} style={{ left: `${left}%`, top: `${top}%` }} onClick={() => setActiveId(entry.id)} aria-label={`查看 ${entry.name}`}><Icon /><span>{index + 1}</span></button>; })}</div>
     </main>
-    <section className="map-explore-sheet">
-      <i className="sheet-grip" />
-      <header><div><small>你的城市感知图层</small><h1>{filteredEntries.length ? `${filteredEntries.length} 处余白正在发光` : "还没有找到这类余白"}</h1></div><Navigation /></header>
-      {activeEntry ? <button className="map-active-place" onClick={() => openEntry(activeEntry.id)}><i><MapPin /></i><span><b>{activeEntry.name}</b><small>{activeEntry.category} · {activeEntry.keyword}</small><em>{activeEntry.fieldVerified ? "真实路线记录" : "待再次感知"}</em></span><ChevronRight /></button> : <div className="map-explore-empty"><span>换一个筛选条件，或亲自留下第一处地点。</span></div>}
-      <div className="map-sheet-actions"><button onClick={add}><Plus />添加一处余白</button>{activeEntry && <button onClick={() => openEntry(activeEntry.id)}>打开记忆 <ChevronRight /></button>}</div>
+    <section className={`map-explore-sheet ${sheetExpanded ? "expanded" : "collapsed"}`}>
+      <button className="map-sheet-handle" aria-label={sheetExpanded ? "收起地点列表" : "展开地点列表"} aria-expanded={sheetExpanded}
+        onPointerDown={event => { dragStart.current = event.clientY; event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerUp={event => { const distance = dragStart.current === null ? 0 : event.clientY - dragStart.current; if (distance < -35) setSheetExpanded(true); else if (distance > 35) setSheetExpanded(false); else setSheetExpanded(value => !value); dragStart.current = null; }}
+        onPointerCancel={() => { dragStart.current = null; }}><i /><span>{sheetExpanded ? "下滑回到地图" : "上滑查看全部地点"}</span></button>
+      <header><div><small>我的余白地点</small><h1>{filteredEntries.length ? `${filteredEntries.length} 处记录` : "还没有记录"}</h1></div><Navigation /></header>
+      {!sheetExpanded && (activeEntry ? <button className="map-active-place" onClick={() => openEntry(activeEntry.id)}><i><MapPin /></i><span><b>{activeEntry.name}</b><small>{activeEntry.category} · {activeEntry.keyword}</small></span><ChevronRight /></button> : <div className="map-explore-empty"><span>换一个筛选条件，或亲自留下第一处地点。</span></div>)}
+      {sheetExpanded && <div className="map-expanded-list">{filteredEntries.length ? filteredEntries.map((entry, index) => { const Icon = icons[index % icons.length]; return <button key={entry.id} onClick={() => openEntry(entry.id)}><i><Icon /></i><span><b>{entry.name}</b><small>{entry.category} · {entry.keyword}</small></span><ChevronRight /></button>; }) : <div className="map-explore-empty"><span>这里还没有符合条件的地点。</span></div>}</div>}
+      <div className="map-sheet-actions"><button onClick={add}><Plus />添加一处余白</button><small><ShieldCheck />只展示你主动保存的地点</small></div>
     </section>
     <BottomNav current="map" navigate={navigate} />
   </section>;
@@ -239,7 +247,7 @@ export function ProfileScreen({ navigate, memories, entries, openEntry }: { navi
   const recentEntries = entries.slice(0, 2);
   return <section className="screen hub-screen profile-screen"><BrandHeader />
     <main className="hub-scroll">
-      <header><div className="profile-orb"><CircleUserRound /></div><h1>内在之海</h1><p>你的感知如何慢慢形成自己的潮汐</p></header>
+      <header><div className="profile-orb"><i /><i /><CircleUserRound /></div><h1>内在之海</h1><p>你的感知如何慢慢形成自己的潮汐</p></header>
       <section className="profile-stats"><div><b>{memories.length}</b><small>次漫游</small></div><div><b>{entries.length}</b><small>处余白</small></div><div><b>{keywords.length}</b><small>个关键词</small></div></section>
       <section className="inner-sea"><header><span><Waves />最近的内在潮汐</span><small>近 30 天</small></header><div className="sea-chart"><i /><i /><i /><span>松动</span><span>好奇</span><span>安静</span></div><p>你的感知正在从“空转”缓慢转向“愿意停留”。</p></section>
       <section className="portrait-keywords"><h2>正在形成的自画像</h2><div>{keywords.length ? keywords.map(keyword => <span key={keyword}>{keyword}</span>) : <span>完成并保存一次漫游后开始形成</span>}</div></section>
