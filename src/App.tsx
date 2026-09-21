@@ -223,8 +223,12 @@ function InputScreen({ value, setValue, next }: { value: InputState; setValue: (
 }
 
 function ThinkingScreen({ input, next }: { input: InputState; next: () => void }) {
-  useEffect(() => { const t = window.setTimeout(next, 1500); return () => clearTimeout(t); }, [next]);
-  return <section className="screen thinking-screen" aria-live="polite"><div className="thinking-orbit"><i /><i /><span><Sparkles /></span><em>能量 · {input.energy}%</em><em>{input.social}边界</em><em>{input.time} 分钟</em></div><main><h2>正在整理此刻的你</h2><p>把能量、时间、社交边界和行动倾向放在一起理解</p><div><span /><span /><span /></div></main></section>;
+  useEffect(() => { const t = window.setTimeout(next, 3000); return () => clearTimeout(t); }, [next]);
+  return <section className="screen thinking-screen" aria-live="polite">
+    <div className="thinking-ambient" aria-hidden="true"><i /><i /><i /></div>
+    <div className="thinking-orbit"><i /><i /><b className="thinking-sweep" /><span><Sparkles /></span><em>能量 · {input.energy}%</em><em>{input.social}边界</em><em>{input.time} 分钟</em><small className="orbit-node orbit-node-one" /><small className="orbit-node orbit-node-two" /></div>
+    <main><small className="thinking-kicker">YU BAI · SENSING</small><h2>正在整理此刻的你</h2><p>把能量、时间、社交边界和行动倾向，慢慢放在一起理解</p><div className="thinking-phases"><span>倾听状态</span><i /><span>辨认边界</span><i /><span>生成余白</span></div><div className="thinking-dots"><span /><span /><span /></div></main>
+  </section>;
 }
 
 function NegotiationScreen({ input, selected, setSelected, custom, setCustom, next, back, interpretation, interpretationStatus, interpretationError }: { input: InputState; selected: string; setSelected: (v: string) => void; custom: string; setCustom: (v: string) => void; next: () => void; back: () => void; interpretation: InterpretationData | null; interpretationStatus: "loading" | "live" | "fallback"; interpretationError: string }) {
@@ -640,6 +644,7 @@ export default function App() {
         createdAt: new Date().toISOString(),
         source: `${liveRoute.source} · 本次漫游路线`,
         fieldVerified: stop.fieldVerified,
+        location: reflection.saveLocation ? stop.location : undefined,
       };
     }) || momentList.map((moment, index) => ({
       id: `${id}-${moment.stopId || index}`,
