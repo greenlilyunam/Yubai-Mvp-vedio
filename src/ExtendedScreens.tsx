@@ -11,6 +11,8 @@ import worldContours from "./assets/world-contours.png";
 import yubaiCard from "./assets/yubai-card.jpg";
 import mapStylized from "./assets/map-stylized.png";
 import mapDetail from "./assets/map-detail.png";
+import { AmapCanvas, reverseGeocode } from "./AmapCanvas";
+import type { AmapCanvasHandle, GeoPoint } from "./AmapCanvas";
 
 export type HubTab = "home" | "resonance" | "map" | "profile";
 
@@ -43,7 +45,34 @@ export type MapMemory = {
   source: string;
   fieldVerified: boolean;
   location?: { longitude: number; latitude: number };
+  checkInStatus?: "device" | "manual" | "route";
+  accuracyMeters?: number;
+  arrivalDistanceMeters?: number;
+  checkedInAt?: string;
 };
+
+export type MapCheckInDraft = {
+  name: string;
+  category: string;
+  address: string;
+  note: string;
+  location: GeoPoint;
+  fieldVerified: boolean;
+  checkInStatus: "device" | "manual";
+  accuracyMeters?: number;
+};
+
+function pointDistance(a: GeoPoint, b: GeoPoint) {
+  const radians = (value: number) => value * Math.PI / 180;
+  const latDelta = radians(b.latitude - a.latitude);
+  const lngDelta = radians(b.longitude - a.longitude);
+  const value = Math.sin(latDelta / 2) ** 2 + Math.cos(radians(a.latitude)) * Math.cos(radians(b.latitude)) * Math.sin(lngDelta / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+function coordinateLabel(point: GeoPoint) {
+  return `${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)}`;
+}
 
 function BrandHeader({ close, readWorld }: { close?: () => void; readWorld?: () => void }) {
   const [panel, setPanel] = useState<HomeHeaderPanel | null>(null);
@@ -186,9 +215,10 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
   const [filter, setFilter] = useState<(typeof filters)[number]>("全部");
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState(entries[0]?.id || "");
-  const [zoom, setZoom] = useState(1);
+  const [mapStatus, setMapStatus] = useState<"loading" | "ready" | "missing-key" | "error">("loading");
   const [sheetExpanded, setSheetExpanded] = useState(false);
   const dragStart = useRef<number | null>(null);
+  const mapRef = useRef<AmapCanvasHandle | null>(null);
   const filteredEntries = entries.filter(entry => {
     const matchesFilter = filter === "全部" || entry.category.includes(filter);
     const haystack = `${entry.name}${entry.category}${entry.address}${entry.keyword}`.toLowerCase();
@@ -198,14 +228,16 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
   useEffect(() => {
     if (filteredEntries.length && !filteredEntries.some(entry => entry.id === activeId)) setActiveId(filteredEntries[0].id);
   }, [activeId, filteredEntries]);
-  const pinPositions = [[24, 29], [68, 38], [44, 52], [76, 61], [19, 67], [54, 24]];
-  return <section className="screen hub-screen map-screen"><div className="map-background map-explore-background" style={{ transform: `scale(${1 + zoom * .035})` }}><img src={mapStylized} alt="余白地点探索地图" /></div>
-    <header className="map-explore-header"><div><small>MY YU BAI MAP</small><b>余白地图</b></div><span><Compass />探索中</span></header>
+  const mappedEntries = filteredEntries.filter((entry): entry is MapMemory & { location: GeoPoint } => Boolean(entry.location));
+  const mapPoints = mappedEntries.map(entry => ({ id: entry.id, label: entry.name, location: entry.location, verified: entry.checkInStatus === "device" }));
+  return <section className="screen hub-screen map-screen">
+    <AmapCanvas ref={mapRef} className="map-background map-real-background" fallbackImage={mapStylized} points={mapPoints} activeId={activeEntry?.id} onMarkerClick={setActiveId} onStatusChange={setMapStatus} />
+    <header className="map-explore-header"><div><small>MY YU BAI MAP</small><b>余白地图</b></div><span className={mapStatus === "ready" ? "is-live" : ""}><Compass />{mapStatus === "ready" ? "真实地图" : mapStatus === "missing-key" ? "待启用" : mapStatus === "error" ? "暂时离线" : "地图准备中"}</span></header>
     <main className="map-explorer">
       <label className="map-search"><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索地点或感知关键词" aria-label="搜索余白地点" /><SlidersHorizontal /></label>
       <div className="map-filters" aria-label="地点筛选">{filters.map(item => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div>
-      <div className="map-controls"><button onClick={() => setZoom(value => Math.min(3, value + 1))} aria-label="放大地图">＋</button><button onClick={() => setZoom(value => Math.max(0, value - 1))} aria-label="缩小地图">−</button><button onClick={() => { setFilter("全部"); setQuery(""); setZoom(1); }} aria-label="回到全部地点"><LocateFixed /></button></div>
-      <div className="map-pins" aria-label="地图地点">{filteredEntries.slice(0, 6).map((entry, index) => { const Icon = icons[index % icons.length]; const [left, top] = pinPositions[index]; return <button key={entry.id} className={activeEntry?.id === entry.id ? "active" : ""} style={{ left: `${left}%`, top: `${top}%` }} onClick={() => setActiveId(entry.id)} aria-label={`查看 ${entry.name}`}><Icon /><span>{index + 1}</span></button>; })}</div>
+      <div className="map-explore-boundary"><ShieldCheck />{mappedEntries.length ? `${mappedEntries.length} 个真实坐标标记` : "保存坐标后会在地图上出现"}</div>
+      <div className="map-controls"><button onClick={() => mapRef.current?.zoomIn()} aria-label="放大地图">＋</button><button onClick={() => mapRef.current?.zoomOut()} aria-label="缩小地图">−</button><button onClick={() => { setFilter("全部"); setQuery(""); mapRef.current?.fitPoints(); }} aria-label="查看全部地点"><LocateFixed /></button></div>
     </main>
     <section className={`map-explore-sheet ${sheetExpanded ? "expanded" : "collapsed"}`}>
       <button className="map-sheet-handle" aria-label={sheetExpanded ? "收起地点列表" : "展开地点列表"} aria-expanded={sheetExpanded}
@@ -213,7 +245,7 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
         onPointerUp={event => { const distance = dragStart.current === null ? 0 : event.clientY - dragStart.current; if (distance < -35) setSheetExpanded(true); else if (distance > 35) setSheetExpanded(false); else setSheetExpanded(value => !value); dragStart.current = null; }}
         onPointerCancel={() => { dragStart.current = null; }}><i /><span>{sheetExpanded ? "下滑回到地图" : "上滑查看全部地点"}</span></button>
       <header><div><small>我的余白地点</small><h1>{filteredEntries.length ? `${filteredEntries.length} 处记录` : "还没有记录"}</h1></div><Navigation /></header>
-      {!sheetExpanded && (activeEntry ? <button className="map-active-place" onClick={() => openEntry(activeEntry.id)}><i><MapPin /></i><span><b>{activeEntry.name}</b><small>{activeEntry.category} · {activeEntry.keyword}</small></span><ChevronRight /></button> : <div className="map-explore-empty"><span>换一个筛选条件，或亲自留下第一处地点。</span></div>)}
+      {!sheetExpanded && (activeEntry ? <button className="map-active-place" onClick={() => openEntry(activeEntry.id)}><i><MapPin /></i><span><b>{activeEntry.name}</b><small>{activeEntry.category} · {activeEntry.keyword}</small>{activeEntry.checkInStatus === "device" && <em>设备定位打卡</em>}</span><ChevronRight /></button> : <div className="map-explore-empty"><span>换一个筛选条件，或亲自留下第一处地点。</span></div>)}
       {sheetExpanded && <div className="map-expanded-list">{filteredEntries.length ? filteredEntries.map((entry, index) => { const Icon = icons[index % icons.length]; return <button key={entry.id} onClick={() => openEntry(entry.id)}><i><Icon /></i><span><b>{entry.name}</b><small>{entry.category} · {entry.keyword}</small></span><ChevronRight /></button>; }) : <div className="map-explore-empty"><span>这里还没有符合条件的地点。</span></div>}</div>}
       <div className="map-sheet-actions"><button onClick={add}><Plus />添加一处余白</button><small><ShieldCheck />只展示你主动保存的地点</small></div>
     </section>
@@ -221,20 +253,71 @@ export function MapScreen({ navigate, add, openEntry, entries }: { navigate: (ta
   </section>;
 }
 
-export function MapAddScreen({ back, save }: { back: () => void; save: (name: string, category: string) => void }) {
+export function MapAddScreen({ back, save }: { back: () => void; save: (draft: MapCheckInDraft) => void }) {
   const [kind, setKind] = useState(0);
-  const [name, setName] = useState("灯下停留");
-  const kinds = ["🔑", "🔖", "✚", "📁", "🏠", "👩", "🔭", "✏️"];
+  const [name, setName] = useState("");
+  const [note, setNote] = useState("");
+  const [selectedLocation, setSelectedLocation] = useState<GeoPoint | null>(null);
+  const [deviceLocation, setDeviceLocation] = useState<GeoPoint | null>(null);
+  const [accuracy, setAccuracy] = useState<number | undefined>();
+  const [address, setAddress] = useState("");
+  const [locationStatus, setLocationStatus] = useState<"idle" | "locating" | "located" | "denied">("idle");
+  const [mapStatus, setMapStatus] = useState<"loading" | "ready" | "missing-key" | "error">("loading");
+  const mapRef = useRef<AmapCanvasHandle | null>(null);
+  const kinds = ["🌿", "📖", "☕", "✨"];
+  const categories = ["静谧之所", "值得重访", "临时停留", "灵感地点"];
+  const locate = () => {
+    if (!navigator.geolocation) { setLocationStatus("denied"); return; }
+    setLocationStatus("locating");
+    navigator.geolocation.getCurrentPosition(position => {
+      const point = { longitude: position.coords.longitude, latitude: position.coords.latitude };
+      setDeviceLocation(point);
+      setSelectedLocation(point);
+      setAccuracy(position.coords.accuracy);
+      setLocationStatus("located");
+      mapRef.current?.centerOn(point);
+      reverseGeocode(point).then(setAddress).catch(() => setAddress(coordinateLabel(point)));
+    }, () => setLocationStatus("denied"), { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+  };
+  const selectOnMap = (point: GeoPoint) => {
+    setSelectedLocation(point);
+    reverseGeocode(point).then(setAddress).catch(() => setAddress(coordinateLabel(point)));
+  };
+  const distanceFromDevice = selectedLocation && deviceLocation ? pointDistance(selectedLocation, deviceLocation) : Number.POSITIVE_INFINITY;
+  const deviceVerified = Boolean(deviceLocation && selectedLocation && distanceFromDevice <= Math.max(200, accuracy || 0));
+  const submit = () => {
+    if (!name.trim() || !selectedLocation) return;
+    save({
+      name: name.trim(),
+      category: categories[kind % categories.length],
+      address: address || coordinateLabel(selectedLocation),
+      note: note.trim() || "在这里停留了一会儿，把此刻留在自己的余白地图里。",
+      location: selectedLocation,
+      fieldVerified: deviceVerified,
+      checkInStatus: deviceVerified ? "device" : "manual",
+      accuracyMeters: deviceVerified ? Math.round(accuracy || distanceFromDevice) : undefined,
+    });
+  };
   return <section className="screen map-add-screen"><BrandHeader close={back} />
-    <div className="map-add-canvas"><img src={mapDetail} alt="城市地图" /><label><Search /><input aria-label="搜索地点" placeholder="搜索这里" /></label><i className="pin-a" /><i className="pin-b" /></div>
-    <section className="map-editor"><i className="sheet-grip" /><div className="map-kinds">{kinds.map((item, index) => <button key={item} className={kind === index ? "selected" : ""} onClick={() => setKind(index)}>{item}</button>)}</div><label><MapPin /><input value={name} onChange={event => setName(event.target.value)} placeholder="给这里一个名字" /></label><button disabled={!name.trim()} onClick={() => save(name.trim(), ["静谧之所", "值得重访", "临时停留", "灵感地点"][kind % 4])}>添加到余白地图</button></section>
+    <div className="map-add-canvas"><AmapCanvas ref={mapRef} fallbackImage={mapDetail} selectedLocation={selectedLocation} onSelectLocation={selectOnMap} onStatusChange={setMapStatus} />
+      <div className="map-add-map-hint"><MapPin /><span><b>{selectedLocation ? "地点已选定" : "点地图选择一处地点"}</b><small>{selectedLocation ? address || coordinateLabel(selectedLocation) : mapStatus === "ready" ? "也可以使用设备当前位置" : "地图未启用时仍可使用设备定位"}</small></span></div>
+    </div>
+    <section className="map-editor real-checkin-editor"><i className="sheet-grip" />
+      <header><div><small>REAL PLACE CHECK-IN</small><b>记录真实的一处余白</b></div><button className={locationStatus === "located" ? "located" : ""} onClick={locate} disabled={locationStatus === "locating"}><LocateFixed />{locationStatus === "locating" ? "定位中…" : locationStatus === "located" ? "重新定位" : "使用当前位置"}</button></header>
+      <p className={`checkin-status ${deviceVerified ? "verified" : ""}`}>{deviceVerified ? <><ShieldCheck />设备定位已核验{accuracy ? ` · 精度约 ${Math.round(accuracy)} 米` : ""}</> : selectedLocation ? <><MapPin />手动选点 · 将标记为待实地核验</> : locationStatus === "denied" ? <><LockKeyhole />未获得定位权限，可在地图上手动选点</> : <><ShieldCheck />只在你主动打卡时读取一次位置</>}</p>
+      <div className="map-kinds">{kinds.map((item, index) => <button key={item} className={kind === index ? "selected" : ""} onClick={() => setKind(index)} aria-label={categories[index % categories.length]}>{item}</button>)}</div>
+      <label><MapPin /><input value={name} onChange={event => setName(event.target.value)} placeholder="给这里一个名字" /></label>
+      <label className="map-note-input"><Sparkles /><input value={note} onChange={event => setNote(event.target.value)} placeholder="写下一句此刻的感受（可选）" /></label>
+      <button disabled={!name.trim() || !selectedLocation} onClick={submit}>保存这处真实地点</button>
+    </section>
   </section>;
 }
 
 export function MapEntryScreen({ back, entry }: { back: () => void; entry: MapMemory | null }) {
   return <section className="screen scroll-screen map-entry-screen"><header><button onClick={back}><ChevronLeft /></button><b>{entry?.category || "余白地点"}</b><span /></header>
     <main>{entry?.photo ? <img src={entry.photo} alt={`${entry.name}的现场记录`} /> : entry ? <div className="map-entry-placeholder"><MapPin /><small>没有留下照片</small><b>{entry.name}</b><span>{entry.category} · {entry.keyword}</span></div> : <img src={yubaiCard} alt="余白地点体验示例" />}<div className="map-entry-title"><small>{entry?.address || "深圳 · 南山区"}</small><h1>{entry?.name || "还没有选择地点"}</h1><p>{entry?.note || "从余白地图中选择一处真实经历，即可查看当时留下的感知。"}</p></div>
-      <section><h2>被保留下来的感知</h2><div><span>{entry?.keyword || "未命名"}</span><span>{entry?.category || "个人地点"}</span>{entry?.audio && <span>声音记录</span>}<span>{entry?.fieldVerified ? "地点信息已核验" : "体验条件待核验"}</span></div></section>
+      <section><h2>被保留下来的感知</h2><div><span>{entry?.keyword || "未命名"}</span><span>{entry?.category || "个人地点"}</span>{entry?.audio && <span>声音记录</span>}<span>{entry?.checkInStatus === "device" ? "设备定位打卡" : entry?.checkInStatus === "manual" ? "地图手动选点" : entry?.fieldVerified ? "地点信息已核验" : "体验条件待核验"}</span>{entry?.accuracyMeters && <span>定位精度约 {entry.accuracyMeters} 米</span>}{entry?.arrivalDistanceMeters !== undefined && <span>抵达时距节点约 {entry.arrivalDistanceMeters} 米</span>}</div></section>
+      {entry?.location && <section className="map-entry-coordinate"><h2>真实坐标记录</h2><div><span>北纬 {entry.location.latitude.toFixed(6)}</span><span>东经 {entry.location.longitude.toFixed(6)}</span></div>{entry.checkedInAt && <small>{new Date(entry.checkedInAt).toLocaleString("zh-CN", { hour12: false })}</small>}</section>}
       <aside><Sparkles /><p><b>来源与边界</b>{entry ? `${entry.source}。这段文字来自你的记录或本次地点任务，不是AI虚构的地点评价。` : "这里不会展示未保存的路线或虚构地点。"}</p></aside>
       {entry?.audio && <audio className="map-entry-audio" controls src={entry.audio} preload="metadata" />}
       <button className="primary-button" onClick={back}><span>回到我的余白地图</span><ChevronRight /></button>

@@ -3,4 +3,6 @@ dist/
 .public-preview/
 *.tsbuildinfo
 *.log
+.env
+.env.local
 

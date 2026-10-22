@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, ArrowRight, BatteryMedium, Camera, Check, ChevronDown, Clock3,
-  Cloud, Compass, Footprints, Leaf, Lightbulb, Map, MessageCircleMore, Minus,
+  Cloud, Compass, Footprints, Leaf, Lightbulb, LocateFixed, Map, MessageCircleMore, Minus,
   Mic, Pencil, Plus, Route, ShieldCheck, Sparkles, Trash2, Upload,
   Users, Volume2, Wind, X,
 } from "lucide-react";
@@ -9,12 +9,19 @@ import {
   HomeScreen, MapAddScreen, MapEntryScreen, MapScreen, ProfileScreen,
   ResonanceScreen, ResultCardScreen, SplashScreen, WorldReadingScreen,
 } from "./ExtendedScreens";
-import type { HubTab, JourneyMemory, MapMemory } from "./ExtendedScreens";
+import type { HubTab, JourneyMemory, MapCheckInDraft, MapMemory } from "./ExtendedScreens";
 
 type Step = "splash" | "home" | "world" | "resonance" | "map" | "mapAdd" | "mapEntry" | "profile" | "card" | "input" | "thinking" | "negotiate" | "plan" | "journey" | "adjust" | "reflection" | "done";
 type Branch = "noise" | "tired" | "continue";
 type InputState = { energy: number; time: number; social: "独处" | "轻微接触" | "开放交流"; action: "散步" | "坐一会" | "寻找灵感"; description: string };
 type JourneyMoment = { stopId: string; stopName: string; photo: string; audio: string; note: string };
+type JourneyArrival = {
+  stopId: string;
+  arrivedAt: string;
+  location: { longitude: number; latitude: number };
+  distanceMeters: number;
+  accuracyMeters: number;
+};
 type ReflectionResult = {
   saved: boolean;
   keyword: string;
@@ -24,6 +31,18 @@ type ReflectionResult = {
   addToMap: boolean;
   saveLocation: boolean;
 };
+
+const LOCAL_MAP_STORAGE_KEY = "yubai-local-map-checkins-v1";
+
+function readLocalMapCheckIns(): MapMemory[] {
+  try {
+    const value = window.localStorage.getItem(LOCAL_MAP_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : [];
+    return Array.isArray(parsed) ? parsed.filter(item => item && typeof item.id === "string" && typeof item.name === "string") : [];
+  } catch {
+    return [];
+  }
+}
 type WeatherData = {
   ok: true;
   area: { province: string; city: string; adcode: string };
@@ -71,6 +90,14 @@ type RouteData = {
   fitExplanation: string[];
 };
 type RoutePreference = "balanced" | "calm" | "sheltered" | "inspiration" | "social";
+
+function geoDistanceMeters(a: { longitude: number; latitude: number }, b: { longitude: number; latitude: number }) {
+  const radians = (value: number) => value * Math.PI / 180;
+  const latDelta = radians(b.latitude - a.latitude);
+  const lngDelta = radians(b.longitude - a.longitude);
+  const value = Math.sin(latDelta / 2) ** 2 + Math.cos(radians(a.latitude)) * Math.cos(radians(b.latitude)) * Math.sin(lngDelta / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
 type InterpretationData = {
   ok: true;
   source: string;
@@ -487,24 +514,73 @@ function MomentCapture({ stop, moment, save, clear }: { stop: RouteStop; moment?
   </section>;
 }
 
-function JourneyScreen({ feedback, finish, notice, node, advance, route, moments, saveMoment, clearMoment }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void; route: RouteData | null; moments: Record<string, JourneyMoment>; saveMoment: (moment: JourneyMoment) => void; clearMoment: (stopId: string) => void }) {
+function JourneyScreen({ feedback, finish, notice, node, advance, skip, route, moments, saveMoment, clearMoment, arrivals, markArrival, completedStopIds, skippedStopIds }: { feedback: () => void; finish: () => void; notice: string; node: number; advance: () => void; skip: () => void; route: RouteData | null; moments: Record<string, JourneyMoment>; saveMoment: (moment: JourneyMoment) => void; clearMoment: (stopId: string) => void; arrivals: Record<string, JourneyArrival>; markArrival: (arrival: JourneyArrival) => void; completedStopIds: string[]; skippedStopIds: string[] }) {
   const hasLiveRoute = Boolean(route?.stops.length);
   const total = hasLiveRoute ? route!.stops.length : 3;
   const currentNode = Math.min(node, total);
   const currentStop = hasLiveRoute ? route!.stops[currentNode - 1] : null;
   const currentLeg = hasLiveRoute ? route!.legs[currentNode - 1] : null;
-  const stateClass = (index: number) => index < currentNode ? "done" : index === currentNode ? "active" : "";
+  const currentArrival = currentStop ? arrivals[currentStop.id] : undefined;
+  const [locationStatus, setLocationStatus] = useState<"idle" | "locating" | "away" | "arrived" | "denied" | "unsupported">("idle");
+  const [currentDistance, setCurrentDistance] = useState<number | null>(null);
+  const arrivalRef = useRef(currentArrival);
+  const markArrivalRef = useRef(markArrival);
+  arrivalRef.current = currentArrival;
+  markArrivalRef.current = markArrival;
+  const stateClass = (index: number, stopId?: string) => skippedStopIds.includes(stopId || "") ? "skipped" : completedStopIds.includes(stopId || "") || index < currentNode ? "done" : index === currentNode ? "active" : "";
   const currentWalkingMinutes = currentLeg ? Math.max(1, Math.round(currentLeg.durationSeconds / 60)) : currentNode === 2 ? 12 : 8;
   const originName = currentNode === 1 ? route?.origin.name : route?.stops[currentNode - 2]?.name;
 
+  const assessPosition = (position: GeolocationPosition) => {
+    if (!currentStop) return;
+    const location = { longitude: position.coords.longitude, latitude: position.coords.latitude };
+    const distance = geoDistanceMeters(location, currentStop.location);
+    const accuracy = Math.max(1, Math.round(position.coords.accuracy || 1));
+    const withinRange = accuracy <= 200 && distance <= Math.max(120, accuracy);
+    setCurrentDistance(Math.round(distance));
+    if (withinRange) {
+      setLocationStatus("arrived");
+      if (!arrivalRef.current) markArrivalRef.current({ stopId: currentStop.id, arrivedAt: new Date().toISOString(), location, distanceMeters: Math.round(distance), accuracyMeters: accuracy });
+    } else {
+      setLocationStatus("away");
+    }
+  };
+
+  useEffect(() => {
+    setCurrentDistance(currentArrival?.distanceMeters ?? null);
+    if (currentArrival) { setLocationStatus("arrived"); return; }
+    if (!currentStop || !navigator.geolocation) { setLocationStatus(currentStop ? "unsupported" : "idle"); return; }
+    setLocationStatus("locating");
+    const watchId = navigator.geolocation.watchPosition(assessPosition, error => setLocationStatus(error.code === error.PERMISSION_DENIED ? "denied" : "away"), { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 });
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [currentStop?.id]);
+
+  const checkAgain = () => {
+    if (!navigator.geolocation) { setLocationStatus("unsupported"); return; }
+    setLocationStatus("locating");
+    navigator.geolocation.getCurrentPosition(assessPosition, () => setLocationStatus("denied"), { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+  };
+
+  const arrivalCopy = currentArrival
+    ? `已在距节点约 ${currentArrival.distanceMeters} 米处核验抵达 · 精度约 ${currentArrival.accuracyMeters} 米`
+    : locationStatus === "locating" ? "正在判断你与当前节点的距离…"
+      : locationStatus === "away" && currentDistance !== null ? `距当前节点约 ${currentDistance} 米，进入 120 米范围后自动确认`
+        : locationStatus === "denied" ? "未获得定位权限；你仍可手动完成，但不会标为真实抵达"
+          : locationStatus === "unsupported" ? "当前浏览器不支持定位；节点只能作为手动完成记录"
+            : "只在漫游页面开启期间判断抵达，不进行后台轨迹记录";
+
   return <section className="screen scroll-screen journey-screen"><Header title="感知路径" /><main className="page journey-page"><div className="journey-status"><i /><span>{hasLiveRoute ? "正在跟随真实地点路线" : "正在载入地点路线"}</span><b>{currentNode}/{total} · 步行 {currentWalkingMinutes} 分钟</b></div>{notice && <div className="journey-notice" role="status"><Check />{notice}</div>}<h1>{currentStop ? <>去往{displayPlaceName(currentStop.name)}，<br />让感知发生在真实地点。</> : <>跟随这些节点，<br />重新连接环境的纹理。</>}</h1><p className="lead">{currentStop && currentLeg ? `从${originName ? displayPlaceName(originName) : "上一节点"}出发，本段约 ${currentLeg.distanceMeters} 米。抵达后停留 ${currentStop.suggestedStayMinutes} 分钟。` : "真实路线载入前先保持低强度；任何节点都可以跳过。"}</p>
+    {currentStop && <section className={`arrival-check ${currentArrival ? "verified" : locationStatus}`} role="status"><i>{currentArrival ? <Check /> : <LocateFixed />}</i><div><b>{currentArrival ? "已抵达当前余白点" : "抵达范围判断"}</b><p>{arrivalCopy}</p></div>{!currentArrival && (locationStatus === "denied" || locationStatus === "away" || locationStatus === "unsupported") && <button onClick={checkAgain}>重新检测</button>}</section>}
     {hasLiveRoute && route ? <section className="journey-timeline journey-live">{route.stops.map((stop, index) => {
       const itemNode = index + 1;
       const leg = route.legs[index];
       const Icon = routeIcon(stop.category);
       const walkingMinutes = Math.max(1, Math.round((leg?.durationSeconds || 0) / 60));
-      return <article key={stop.id} className={stateClass(itemNode)}><i>{itemNode < currentNode ? <Check /> : itemNode}</i><div><small>{itemNode < currentNode ? "已完成" : itemNode === currentNode ? "现在前往" : "下一地点"} · 步行 {walkingMinutes} 分钟</small><h3>{displayPlaceName(stop.name)}</h3><p>{stop.suggestedAction}</p><aside className="journey-place-meta"><span><Icon />{stop.category}</span><span><Footprints />{leg?.distanceMeters || 0} 米</span><span><Clock3 />停留 {stop.suggestedStayMinutes} 分钟</span></aside><a className="amap-link" href={amapNavigationUrl(route, index)} target="_blank" rel="noreferrer"><Route />在高德查看本段步行路线</a>{itemNode === currentNode && <><span className="journey-place-note"><Sparkles />任务来自这个地点的空间类型，不是随机文案</span><MomentCapture stop={stop} moment={moments[stop.id]} save={saveMoment} clear={() => clearMoment(stop.id)} /></>}</div></article>;
-    })}</section> : <section className="journey-timeline"><article className={stateClass(1)}><i>{currentNode > 1 ? <Check /> : 1}</i><div><small>{currentNode > 1 ? "完成" : "现在"}</small><h3>断开屏幕</h3><p>走出住所，让眼睛重新适应远处。</p></div></article><article className={stateClass(2)}><i>{currentNode > 2 ? <Check /> : 2}</i><div><small>{currentNode > 2 ? "完成" : currentNode === 2 ? "现在" : "下一步"}</small><h3>触碰自然</h3><p>听风的声音，观察地面上的光。</p></div></article><article className={stateClass(3)}><i>3</i><div><small>{currentNode === 3 ? "现在" : "下一步"}</small><h3>留下一处空间</h3><p>拍下一处让你感觉有呼吸感的空间。</p></div></article></section>}<div className="journey-location-boundary"><ShieldCheck />到达与完成由你手动确认，余白不会持续上传实时位置。</div><button className="finish-button" onClick={currentNode < total ? advance : finish}>{currentNode < total ? `完成“${currentStop ? displayPlaceName(currentStop.name) : "当前节点"}”` : "完成本次感知"}</button><button className="feedback-button" onClick={feedback}><Sparkles />此刻感觉怎么样？</button>
+      const isSkipped = skippedStopIds.includes(stop.id);
+      const isCompleted = completedStopIds.includes(stop.id);
+      const hasArrival = Boolean(arrivals[stop.id]);
+      return <article key={stop.id} className={stateClass(itemNode, stop.id)}><i>{isSkipped ? "—" : isCompleted || itemNode < currentNode ? <Check /> : itemNode}</i><div><small>{isSkipped ? "已跳过" : isCompleted || itemNode < currentNode ? hasArrival ? "已抵达并完成" : "手动完成 · 未核验抵达" : itemNode === currentNode ? "现在前往" : "下一地点"} · 步行 {walkingMinutes} 分钟</small><h3>{displayPlaceName(stop.name)}</h3><p>{stop.suggestedAction}</p><aside className="journey-place-meta"><span><Icon />{stop.category}</span><span><Footprints />{leg?.distanceMeters || 0} 米</span><span><Clock3 />停留 {stop.suggestedStayMinutes} 分钟</span>{hasArrival && <span><LocateFixed />真实抵达</span>}</aside><a className="amap-link" href={amapNavigationUrl(route, index)} target="_blank" rel="noreferrer"><Route />在高德查看本段步行路线</a>{itemNode === currentNode && <><span className="journey-place-note"><Sparkles />现场记录将与这个路线节点一一对应</span><MomentCapture stop={stop} moment={moments[stop.id]} save={saveMoment} clear={() => clearMoment(stop.id)} /></>}</div></article>;
+    })}</section> : <section className="journey-timeline"><article className={stateClass(1)}><i>{currentNode > 1 ? <Check /> : 1}</i><div><small>{currentNode > 1 ? "完成" : "现在"}</small><h3>断开屏幕</h3><p>走出住所，让眼睛重新适应远处。</p></div></article><article className={stateClass(2)}><i>{currentNode > 2 ? <Check /> : 2}</i><div><small>{currentNode > 2 ? "完成" : currentNode === 2 ? "现在" : "下一步"}</small><h3>触碰自然</h3><p>听风的声音，观察地面上的光。</p></div></article><article className={stateClass(3)}><i>3</i><div><small>{currentNode === 3 ? "现在" : "下一步"}</small><h3>留下一处空间</h3><p>拍下一处让你感觉有呼吸感的空间。</p></div></article></section>}<div className="journey-location-boundary"><ShieldCheck />仅在漫游页面开启期间判断与节点的距离；不会保存连续轨迹。</div><div className="journey-node-actions"><button className="finish-button" onClick={currentNode < total ? advance : finish}>{currentArrival ? <Check /> : null}{currentNode < total ? `${currentArrival ? "完成并记录" : "手动完成"}“${currentStop ? displayPlaceName(currentStop.name) : "当前节点"}”` : currentArrival ? "完成并保存本次感知" : "手动完成本次感知"}</button>{currentStop && <button className="skip-node-button" onClick={skip}>跳过此节点</button>}</div><button className="feedback-button" onClick={feedback}><Sparkles />此刻感觉怎么样？</button>
   </main></section>;
 }
 
@@ -528,12 +604,12 @@ function Toggle({ label, detail, value, change }: { label: string; detail: strin
   return <button className="toggle-row" onClick={change}><span><b>{label}</b><small>{detail}</small></span><i className={value ? "on" : ""}><em /></i></button>;
 }
 
-function ReflectionScreen({ done, moments, removeMoment }: { done: (result: ReflectionResult) => void; moments: Record<string, JourneyMoment>; removeMoment: (stopId: string) => void }) {
-  const [image, setImage] = useState(""); const [caption, setCaption] = useState(""); const [keyword, setKeyword] = useState("松动"); const [inference, setInference] = useState(true); const [summary, setSummary] = useState("今天你选择了一条低刺激的路径，让密集的思绪在脚步与光影之间慢慢松开。"); const [location, setLocation] = useState(false); const [map, setMap] = useState(true); const [memory, setMemory] = useState(false); const ref = useRef<HTMLInputElement>(null);
+function ReflectionScreen({ done, moments, removeMoment, hasVerifiedArrival }: { done: (result: ReflectionResult) => void; moments: Record<string, JourneyMoment>; removeMoment: (stopId: string) => void; hasVerifiedArrival: boolean }) {
+  const [image, setImage] = useState(""); const [caption, setCaption] = useState(""); const [keyword, setKeyword] = useState("松动"); const [inference, setInference] = useState(true); const [summary, setSummary] = useState("今天你选择了一条低刺激的路径，让密集的思绪在脚步与光影之间慢慢松开。"); const [location, setLocation] = useState(hasVerifiedArrival); const [map, setMap] = useState(true); const [memory, setMemory] = useState(false); const ref = useRef<HTMLInputElement>(null);
   const upload = (file?: File) => { if (!file) return; const reader = new FileReader(); reader.onload = () => setImage(String(reader.result)); reader.readAsDataURL(file); };
   const momentList = Object.values(moments);
   const finish = (saved: boolean) => done({ saved, keyword: keyword.trim() || "未命名", summary: summary.trim(), caption: caption.trim(), photo: image, addToMap: saved && map, saveLocation: saved && location });
-  return <section className="screen decision-screen"><Header title="今日余白" /><main className="page reflection-page decision-scroll"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p>{momentList.length > 0 && <section className="moment-review"><header><span><Sparkles />沿途留下的瞬间</span><small>{momentList.length} 个地点</small></header>{momentList.map(moment => <article key={moment.stopId}>{moment.photo && <img src={moment.photo} alt={`${moment.stopName}的现场记录`} />}<div><small>{moment.stopName}</small>{moment.note && <p>{moment.note}</p>}{moment.audio && <audio controls src={moment.audio} preload="metadata" />}</div><button onClick={() => removeMoment(moment.stopId)} aria-label={`删除${moment.stopName}的记录`}><Trash2 /></button></article>)}<p><ShieldCheck />这些内容仍只在当前会话中；你可以逐条删除。</p></section>}<button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>{momentList.length ? "再补充一张漫游照片" : "上传一张漫游照片"}</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" capture="environment" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail="默认关闭，不记录路线坐标" value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="关闭后仍可从余白卡手动加入" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section></main><div className="decision-fixed-action reflection-fixed-action"><PrimaryButton onClick={() => finish(true)}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => finish(false)}>不保存，直接结束</button></div></section>;
+  return <section className="screen decision-screen"><Header title="今日余白" /><main className="page reflection-page decision-scroll"><div className="step-label"><b>06</b>与 AI 一起整理，而不是被总结</div><h1>留下你愿意留下的</h1><p className="lead">所有内容都可以修改、删除，或不保存。</p>{momentList.length > 0 && <section className="moment-review"><header><span><Sparkles />沿途留下的瞬间</span><small>{momentList.length} 个地点</small></header>{momentList.map(moment => <article key={moment.stopId}>{moment.photo && <img src={moment.photo} alt={`${moment.stopName}的现场记录`} />}<div><small>{moment.stopName}</small>{moment.note && <p>{moment.note}</p>}{moment.audio && <audio controls src={moment.audio} preload="metadata" />}</div><button onClick={() => removeMoment(moment.stopId)} aria-label={`删除${moment.stopName}的记录`}><Trash2 /></button></article>)}<p><ShieldCheck />这些内容仍只在当前会话中；你可以逐条删除。</p></section>}<button className="photo-upload" onClick={() => ref.current?.click()}>{image ? <img src={image} alt="上传的漫游照片" /> : <><div className="blur-photo" /><Upload /><b>{momentList.length ? "再补充一张漫游照片" : "上传一张漫游照片"}</b><span>点击选择，也可以跳过</span></>}<input ref={ref} type="file" accept="image/*" capture="environment" onChange={e => upload(e.target.files?.[0])} hidden /></button>{image && <div className="photo-insight"><Sparkles /><span><b>AI 建议保留</b>这张照片与你停留最久的感知节点有关；你仍可移除它。</span></div>}<label className="field-label">你想说的一句话 <small>可选</small><textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="这面墙上的树影让我停了一会儿。" /></label><div className="ai-draft"><Sparkles />AI 草稿 · 等待你共同编辑</div><section className="coedit-card"><div><small>今日关键词</small><input aria-label="今日关键词" value={keyword} onChange={e => setKeyword(e.target.value)} /></div><Pencil /></section>{inference && <section className="coedit-card inference"><div><small>AI 观察 <i>推断</i></small><p>你在低人流空间停留得更久。</p></div><button onClick={() => setInference(false)}><Trash2 />删除推断</button></section>}<section className="summary-card"><header><span>今日总结</span><small><Pencil />可编辑</small></header><textarea aria-label="今日总结" value={summary} onChange={e => setSummary(e.target.value)} placeholder="写下你愿意保留的部分……" /></section><div className="coedit-control"><ShieldCheck />AI 只提供草稿，最终版本和保存范围始终由你决定。</div><section className="privacy"><h3><ShieldCheck />由你决定保存范围</h3><Toggle label="保存具体位置" detail={hasVerifiedArrival ? "已核验抵达的节点默认保存，可随时关闭" : "默认关闭，不记录路线坐标"} value={location} change={() => setLocation(!location)} /><Toggle label="加入个人精神地图" detail="关闭后仍可从余白卡手动加入" value={map} change={() => setMap(!map)} /><Toggle label="进入长期记忆" detail="用于未来漫游建议，默认关闭" value={memory} change={() => setMemory(!memory)} /></section></main><div className="decision-fixed-action reflection-fixed-action"><PrimaryButton onClick={() => finish(true)}>按我的选择保存</PrimaryButton><button className="text-button" onClick={() => finish(false)}>不保存，直接结束</button></div></section>;
 }
 
 function DoneScreen({ restart, viewCard, saved, keyword }: { restart: () => void; viewCard: () => void; saved: boolean; keyword: string }) {
@@ -547,12 +623,18 @@ export default function App() {
   const [step, setStep] = useState<Step>(initialStep); const [sheet, setSheet] = useState(requested === "feedback"); const [branch, setBranch] = useState<Branch>("noise"); const [notice, setNotice] = useState(""); const [journeyNode, setJourneyNode] = useState(1); const [result, setResult] = useState({ saved: true, keyword: "松动" }); const [liveRoute, setLiveRoute] = useState<RouteData | null>(null); const [aiInterpretation, setAiInterpretation] = useState<InterpretationData | null>(null); const [aiInterpretationStatus, setAiInterpretationStatus] = useState<"loading" | "live" | "fallback">("loading"); const [aiInterpretationError, setAiInterpretationError] = useState("");
   const [input, setInput] = useState<InputState>({ energy: 30, time: 40, social: "独处", action: "散步", description: "脑子很乱，一直待在宿舍更难受" }); const [selected, setSelected] = useState("理解得很准确"); const [custom, setCustom] = useState("");
   const [moments, setMoments] = useState<Record<string, JourneyMoment>>({});
+  const [arrivals, setArrivals] = useState<Record<string, JourneyArrival>>({});
+  const [completedStopIds, setCompletedStopIds] = useState<string[]>([]);
+  const [skippedStopIds, setSkippedStopIds] = useState<string[]>([]);
   const [memories, setMemories] = useState<JourneyMemory[]>([]);
   const [currentMemory, setCurrentMemory] = useState<JourneyMemory | null>(null);
-  const [manualPlaces, setManualPlaces] = useState<MapMemory[]>([]);
+  const [manualPlaces, setManualPlaces] = useState<MapMemory[]>(readLocalMapCheckIns);
   const [selectedMapId, setSelectedMapId] = useState("");
   const [pendingRoute, setPendingRoute] = useState<RouteData | null>(null);
   const [adjustmentStatus, setAdjustmentStatus] = useState<"loading" | "live" | "fallback">("fallback");
+  useEffect(() => {
+    try { window.localStorage.setItem(LOCAL_MAP_STORAGE_KEY, JSON.stringify(manualPlaces)); } catch { /* 本地存储不可用时保留当前会话记录。 */ }
+  }, [manualPlaces]);
   const shouldInterpret = step === "thinking" || step === "negotiate";
   useEffect(() => {
     if (!shouldInterpret) return;
@@ -608,13 +690,37 @@ export default function App() {
     return () => { window.clearTimeout(timeout); controller.abort(); };
   }, [branch, input, step]);
   const choose = (b: Branch) => { setBranch(b); setSheet(false); setStep("adjust"); };
-  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); setMoments({}); };
+  const restart = () => { setStep("home"); setSheet(false); setNotice(""); setJourneyNode(1); setLiveRoute(null); setAiInterpretation(null); setAiInterpretationStatus("loading"); setAiInterpretationError(""); setSelected("理解得很准确"); setCustom(""); setMoments({}); setArrivals({}); setCompletedStopIds([]); setSkippedStopIds([]); };
   const saveMoment = (moment: JourneyMoment) => setMoments(current => ({ ...current, [moment.stopId]: moment }));
   const clearMoment = (stopId: string) => setMoments(current => { const next = { ...current }; delete next[stopId]; return next; });
-  const mapEntries = useMemo(() => [
-    ...memories.filter(memory => memory.savedToMap).flatMap(memory => memory.places),
-    ...manualPlaces,
-  ], [manualPlaces, memories]);
+  const markArrival = (arrival: JourneyArrival) => setArrivals(current => current[arrival.stopId] ? current : ({ ...current, [arrival.stopId]: arrival }));
+  const currentJourneyStop = liveRoute?.stops[Math.max(0, journeyNode - 1)];
+  const markCurrentStopCompleted = () => {
+    if (!currentJourneyStop) return;
+    setCompletedStopIds(items => items.includes(currentJourneyStop.id) ? items : [...items, currentJourneyStop.id]);
+    setSkippedStopIds(items => items.filter(id => id !== currentJourneyStop.id));
+  };
+  const advanceJourney = () => {
+    markCurrentStopCompleted();
+    setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1));
+  };
+  const finishJourney = () => {
+    markCurrentStopCompleted();
+    setStep("reflection");
+  };
+  const skipCurrentJourneyStop = () => {
+    if (currentJourneyStop) {
+      setSkippedStopIds(items => items.includes(currentJourneyStop.id) ? items : [...items, currentJourneyStop.id]);
+      setCompletedStopIds(items => items.filter(id => id !== currentJourneyStop.id));
+      clearMoment(currentJourneyStop.id);
+    }
+    if (journeyNode < (liveRoute?.stops.length || 3)) setJourneyNode(value => value + 1);
+    else setStep("reflection");
+  };
+  const mapEntries = useMemo(() => {
+    const combined = [...memories.filter(memory => memory.savedToMap).flatMap(memory => memory.places), ...manualPlaces];
+    return combined.filter((entry, index) => combined.findIndex(candidate => candidate.id === entry.id) === index);
+  }, [manualPlaces, memories]);
   const selectedMapEntry = mapEntries.find(entry => entry.id === selectedMapId) || mapEntries[0] || null;
   const saveCurrentMemoryToMap = () => {
     if (!currentMemory || currentMemory.savedToMap) {
@@ -624,13 +730,16 @@ export default function App() {
     const updated = { ...currentMemory, savedToMap: true };
     setCurrentMemory(updated);
     setMemories(items => items.some(item => item.id === updated.id) ? items.map(item => item.id === updated.id ? updated : item) : [updated, ...items]);
+    setManualPlaces(items => [...updated.places.filter(place => !items.some(item => item.id === place.id)), ...items]);
     setStep("map");
   };
   const completeReflection = (reflection: ReflectionResult) => {
     const id = `journey-${Date.now()}`;
     const momentList = Object.values(moments);
-    const capturedPlaces: MapMemory[] = liveRoute?.stops.map(stop => {
+    const experiencedStops = liveRoute?.stops.filter(stop => !skippedStopIds.includes(stop.id) && (completedStopIds.includes(stop.id) || Boolean(arrivals[stop.id]) || Boolean(moments[stop.id])));
+    const capturedPlaces: MapMemory[] = experiencedStops?.map(stop => {
       const moment = moments[stop.id];
+      const arrival = arrivals[stop.id];
       return {
         id: `${id}-${stop.id}`,
         name: displayPlaceName(stop.name),
@@ -641,8 +750,12 @@ export default function App() {
         audio: moment?.audio || "",
         keyword: reflection.keyword,
         createdAt: new Date().toISOString(),
-        source: `${liveRoute.source} · 本次漫游路线`,
+        source: arrival ? `${liveRoute!.source} · 设备定位抵达` : `${liveRoute!.source} · 手动完成节点`,
         fieldVerified: stop.fieldVerified,
+        checkInStatus: arrival ? "device" : "route",
+        checkedInAt: arrival?.arrivedAt || new Date().toISOString(),
+        accuracyMeters: arrival?.accuracyMeters,
+        arrivalDistanceMeters: arrival?.distanceMeters,
         location: reflection.saveLocation ? stop.location : undefined,
       };
     }) || momentList.map((moment, index) => ({
@@ -687,23 +800,30 @@ export default function App() {
       places: routePlaces,
     };
     setCurrentMemory(memory);
-    if (reflection.saved) setMemories(items => [memory, ...items.filter(item => item.id !== memory.id)]);
+    if (reflection.saved) {
+      setMemories(items => [memory, ...items.filter(item => item.id !== memory.id)]);
+      if (reflection.addToMap) setManualPlaces(items => [...routePlaces.filter(place => !items.some(item => item.id === place.id)), ...items]);
+    }
     setResult({ saved: reflection.saved, keyword: reflection.keyword });
     setStep("done");
   };
-  const addManualPlace = (name: string, category: string) => {
+  const addManualPlace = (draft: MapCheckInDraft) => {
     const entry: MapMemory = {
       id: `manual-${Date.now()}`,
-      name,
-      category,
-      address: "用户手动添加 · 未保存具体位置",
-      note: "这是你主动留在余白地图中的地点，可以在后续真实到访后补充感知。",
+      name: draft.name,
+      category: draft.category,
+      address: draft.address,
+      note: draft.note,
       photo: "",
       audio: "",
-      keyword: "待感知",
+      keyword: draft.fieldVerified ? "此刻在场" : "待实地核验",
       createdAt: new Date().toISOString(),
-      source: "用户手动添加",
-      fieldVerified: false,
+      checkedInAt: new Date().toISOString(),
+      source: draft.fieldVerified ? "设备定位 · 本地保存" : "地图手动选点 · 本地保存",
+      fieldVerified: draft.fieldVerified,
+      checkInStatus: draft.checkInStatus,
+      accuracyMeters: draft.accuracyMeters,
+      location: draft.location,
     };
     setManualPlaces(items => [entry, ...items]);
     setSelectedMapId(entry.id);
@@ -722,6 +842,6 @@ export default function App() {
     {step === "mapEntry" && <MapEntryScreen back={() => setStep("map")} entry={selectedMapEntry} />}
     {step === "profile" && <ProfileScreen navigate={navigateHub} memories={memories} entries={mapEntries} openEntry={id => { setSelectedMapId(id); setStep("mapEntry"); }} />}
     {step === "card" && <ResultCardScreen memory={currentMemory} saveToMap={saveCurrentMemoryToMap} sendToPool={() => setStep("resonance")} navigate={navigateHub} />}
-    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setMoments({}); setCurrentMemory(null); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={() => setStep("reflection")} notice={notice} node={journeyNode} advance={() => setJourneyNode(Math.min(liveRoute?.stops.length || 3, journeyNode + 1))} route={liveRoute} moments={moments} saveMoment={saveMoment} clearMoment={clearMoment} />}{step === "adjust" && <AdjustmentScreen branch={branch} currentRoute={liveRoute} nextRoute={pendingRoute} status={adjustmentStatus} accept={() => { if (pendingRoute) { setLiveRoute(pendingRoute); setJourneyNode(1); } setNotice(pendingRoute ? `已采用新的真实路线：${pendingRoute.stops.map(stop => displayPlaceName(stop.name)).join(" → ")}` : "真实路线暂未更新，已沿原路线继续"); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen moments={moments} removeMoment={clearMoment} done={completeReflection} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
+    {step === "input" && <InputScreen value={input} setValue={setInput} next={() => setStep("thinking")} />}{step === "thinking" && <ThinkingScreen input={input} next={() => setStep("negotiate")} />}{step === "negotiate" && <NegotiationScreen input={input} selected={selected} setSelected={setSelected} custom={custom} setCustom={setCustom} next={() => setStep("plan")} back={() => setStep("input")} interpretation={aiInterpretation} interpretationStatus={aiInterpretationStatus} interpretationError={aiInterpretationError} />}{step === "plan" && <PlanScreen input={input} next={() => { setJourneyNode(1); setMoments({}); setArrivals({}); setCompletedStopIds([]); setSkippedStopIds([]); setCurrentMemory(null); setStep("journey"); }} back={() => setStep("negotiate")} onRouteLoaded={setLiveRoute} initialInterpretation={aiInterpretation} selectedNegotiation={selected} />}{step === "journey" && <JourneyScreen feedback={() => setSheet(true)} finish={finishJourney} notice={notice} node={journeyNode} advance={advanceJourney} skip={skipCurrentJourneyStop} route={liveRoute} moments={moments} saveMoment={saveMoment} clearMoment={clearMoment} arrivals={arrivals} markArrival={markArrival} completedStopIds={completedStopIds} skippedStopIds={skippedStopIds} />}{step === "adjust" && <AdjustmentScreen branch={branch} currentRoute={liveRoute} nextRoute={pendingRoute} status={adjustmentStatus} accept={() => { if (pendingRoute) { setLiveRoute(pendingRoute); setJourneyNode(1); setMoments({}); setArrivals({}); setCompletedStopIds([]); setSkippedStopIds([]); } setNotice(pendingRoute ? `已采用新的真实路线：${pendingRoute.stops.map(stop => displayPlaceName(stop.name)).join(" → ")}` : "真实路线暂未更新，已沿原路线继续"); setStep("journey"); }} modify={() => { setStep("journey"); window.setTimeout(() => setSheet(true), 0); }} />}{step === "reflection" && <ReflectionScreen moments={moments} removeMoment={clearMoment} done={completeReflection} hasVerifiedArrival={Object.keys(arrivals).length > 0} />}{step === "done" && <DoneScreen restart={restart} viewCard={() => setStep("card")} saved={result.saved} keyword={result.keyword} />}{sheet && <FeedbackSheet close={() => setSheet(false)} choose={choose} finish={() => { setSheet(false); setStep("reflection"); }} />}
   </div><span className="device-home" aria-hidden="true" /></div></div>;
 }
